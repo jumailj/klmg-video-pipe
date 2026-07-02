@@ -246,10 +246,10 @@
 		async function createPeerConnection() {
 			// Get TURN servers
 			const turnResponse = await fetch('/api/turn');
-			const turnConfig = await turnResponse.json();
+			const turnData = await turnResponse.json();
 
 			const config = {
-				iceServers: turnConfig
+				iceServers: turnData.servers
 			};
 
 			pc = new RTCPeerConnection(config);
