@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{{.Name}} - Share your screen</title>
+<style>
+  body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0}
+  button{padding:14px 22px;border-radius:8px;border:0;background:#4f7cff;color:#fff;font-size:16px;cursor:pointer}
+  button:disabled{background:#333;cursor:default}
+  video{margin-top:20px;width:60vw;max-width:640px;border-radius:8px;border:1px solid #333}
+  #status{margin-top:14px;font-size:13px;opacity:.7}
+</style>
+</head>
+<body>
+  <h2>{{.Name}}</h2>
+  <button id="startBtn">Start sharing my screen</button>
+  <video id="preview" autoplay muted playsinline></video>
+  <div id="status">not sharing</div>
+
+<script>
+const roomID = "{{.ID}}";
+const proto = location.protocol === "https:" ? "wss" : "ws";
+let ws, pc, localStream;
+
+function setStatus(t){ document.getElementById('status').textContent = t; }
+
+document.getElementById('startBtn').addEventListener('click', startShare);
+
+async function startShare(){
+  document.getElementById('startBtn').disabled = true;
+  try{
+    localStream = await navigator.mediaDevices.getDisplayMedia({video:true, audio:true});
+  }catch(e){
+    setStatus('screen share was cancelled or blocked: ' + e.message);
+    document.getElementById('startBtn').disabled = false;
+    return;
+  }
+  document.getElementById('preview').srcObject = localStream;
+  setStatus('sharing - waiting for OBS to connect...');
+
+  localStream.getVideoTracks()[0].addEventListener('ended', () => {
+    setStatus('sharing stopped');
+    if(pc) pc.close();
+  });
+
+  connectSignaling();
+}
+
+function connectSignaling(){
+  ws = new WebSocket(`${proto}://${location.host}/ws?room=${roomID}&role=player`);
+
+  ws.onmessage = async (ev) => {
+    const msg = JSON.parse(ev.data);
+    if(msg.type === 'peer-joined' && msg.role === 'obs'){
+      await makeOffer();
+    } else if(msg.type === 'answer'){
+      await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      setStatus('connected to OBS');
+    } else if(msg.type === 'candidate' && msg.candidate){
+      try{ await pc.addIceCandidate(msg.candidate); }catch(e){}
+    } else if(msg.type === 'peer-left' && msg.role === 'obs'){
+      setStatus('OBS disconnected - waiting for it to reconnect...');
+    }
+  };
+
+  ws.onclose = () => setStatus('signaling connection closed');
+}
+
+async function makeOffer(){
+  pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+  pc.onicecandidate = (ev) => {
+    if(ev.candidate) ws.send(JSON.stringify({type:'candidate', candidate: ev.candidate}));
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({type:'offer', sdp: pc.localDescription}));
+  setStatus('connecting to OBS...');
+}
+</script>
+</body>
+</html>

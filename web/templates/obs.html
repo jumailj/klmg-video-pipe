@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{{.Name}} - OBS source</title>
+<style>
+  html,body{margin:0;padding:0;background:transparent;overflow:hidden;height:100%}
+  #wrap{position:relative;width:100%;height:100%}
+  video{width:100%;height:100%;object-fit:contain;background:#000}
+  #label{position:absolute;left:12px;bottom:12px;padding:6px 12px;border-radius:6px;
+         background:rgba(0,0,0,.6);color:#fff;font-family:system-ui,sans-serif;font-size:20px}
+  #label.hidden{display:none}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="remote" autoplay playsinline></video>
+  <div id="label">{{.Name}}</div>
+</div>
+
+<script>
+const roomID = "{{.ID}}";
+const proto = location.protocol === "https:" ? "wss" : "ws";
+let ws, pc;
+
+function connect(){
+  ws = new WebSocket(`${proto}://${location.host}/ws?room=${roomID}&role=obs`);
+
+  ws.onmessage = async (ev) => {
+    const msg = JSON.parse(ev.data);
+    if(msg.type === 'offer'){
+      await handleOffer(msg.sdp);
+    } else if(msg.type === 'candidate' && msg.candidate){
+      try{ await pc.addIceCandidate(msg.candidate); }catch(e){}
+    } else if(msg.type === 'peer-left' && msg.role === 'player'){
+      document.getElementById('remote').srcObject = null;
+    }
+  };
+
+  ws.onclose = () => setTimeout(connect, 2000); // auto-reconnect for OBS reliability
+}
+
+async function handleOffer(sdp){
+  pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+
+  pc.ontrack = (ev) => {
+    document.getElementById('remote').srcObject = ev.streams[0];
+  };
+
+  pc.onicecandidate = (ev) => {
+    if(ev.candidate) ws.send(JSON.stringify({type:'candidate', candidate: ev.candidate}));
+  };
+
+  await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  ws.send(JSON.stringify({type:'answer', sdp: pc.localDescription}));
+}
+
+connect();
+</script>
+</body>
+</html>
