@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Watch Stream</title>
+	<style>
+		* { margin: 0; padding: 0; box-sizing: border-box; }
+		body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0e27; color: #fff; }
+		
+		.container {
+			width: 100%;
+			height: 100vh;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+		}
+
+		video {
+			width: 100%;
+			height: 100%;
+			object-fit: contain;
+			background: #000;
+		}
+
+		.overlay {
+			position: fixed;
+			bottom: 20px;
+			right: 20px;
+			padding: 15px 20px;
+			background: rgba(0, 0, 0, 0.7);
+			border-radius: 6px;
+			font-size: 14px;
+			max-width: 300px;
+		}
+
+		.status-label {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			margin: 5px 0;
+		}
+
+		.status-dot {
+			width: 8px;
+			height: 8px;
+			border-radius: 50%;
+			background: #ef4444;
+		}
+
+		.status-dot.connected {
+			background: #22c55e;
+			animation: pulse 1.5s infinite;
+		}
+
+		@keyframes pulse {
+			0%, 100% { opacity: 1; }
+			50% { opacity: 0.5; }
+		}
+
+		.network-badge {
+			display: inline-block;
+			padding: 4px 8px;
+			background: rgba(255, 255, 255, 0.15);
+			border-radius: 4px;
+			font-size: 12px;
+			font-weight: 600;
+		}
+
+		.network-badge.local {
+			background: rgba(34, 197, 94, 0.2);
+			color: #86efac;
+		}
+
+		.network-badge.external {
+			background: rgba(59, 130, 246, 0.2);
+			color: #93c5fd;
+		}
+
+		.waiting {
+			position: fixed;
+			top: 50%;
+			left: 50%;
+			transform: translate(-50%, -50%);
+			text-align: center;
+			z-index: 10;
+		}
+
+		.spinner {
+			display: inline-block;
+			width: 8px;
+			height: 8px;
+			background: #2563eb;
+			border-radius: 50%;
+			animation: pulse 1.5s infinite;
+			margin-right: 8px;
+		}
+
+		.error-box {
+			position: fixed;
+			top: 20px;
+			left: 20px;
+			padding: 15px 20px;
+			background: rgba(239, 68, 68, 0.1);
+			border: 1px solid rgba(239, 68, 68, 0.3);
+			border-radius: 6px;
+			color: #fca5a5;
+			max-width: 400px;
+			display: none;
+			z-index: 20;
+		}
+	</style>
+</head>
+<body>
+	<div class="container">
+		<video id="video" autoplay playsinline></video>
+
+		<div id="waiting" class="waiting">
+			<span class="spinner"></span> Waiting for stream...
+		</div>
+
+		<div class="overlay">
+			<div class="status-label">
+				<span class="status-dot" id="status-dot"></span>
+				<span id="status-text">Connecting...</span>
+			</div>
+			<div id="network-info" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1);"></div>
+		</div>
+
+		<div id="error-box" class="error-box"></div>
+	</div>
+
+	<script>
+		let pc = null;
+		let ws = null;
+		let connecting = false;
+		const roomId = window.location.pathname.split('/watch/')[1];
+		let streamerNetwork = 'unknown';
+
+		function connect() {
+			if (connecting || ws) return;
+			connecting = true;
+
+			const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+			ws = new WebSocket(`${protocol}//${window.location.host}/ws?room=${roomId}&role=viewer`);
+
+			ws.onopen = () => {
+				log('Connected - waiting for stream...', 'info');
+				connecting = false;
+			};
+
+			ws.onmessage = (e) => {
+				const msg = JSON.parse(e.data);
+				handleMessage(msg);
+			};
+
+			ws.onerror = (err) => {
+				log('Connection error', 'error');
+				connecting = false;
+			};
+
+			ws.onclose = () => {
+				log('Reconnecting...', 'disconnected');
+				ws = null;
+				connecting = false;
+				setTimeout(connect, 2000);
+			};
+		}
+
+		async function handleMessage(msg) {
+			if (msg.type === 'streamer-ready') {
+				streamerNetwork = msg.network || 'unknown';
+				updateNetworkInfo();
+				log('Stream is starting...', 'info');
+			} else if (msg.type === 'offer') {
+				handleOffer(msg);
+			} else if (msg.type === 'candidate' && pc) {
+				try {
+					await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+				} catch (err) {
+					console.error('Error adding ICE candidate:', err);
+				}
+			} else if (msg.type === 'streamer-left') {
+				log('Stream disconnected', 'disconnected');
+				if (pc) {
+					pc.close();
+					pc = null;
+				}
+				document.getElementById('video').srcObject = null;
+				document.getElementById('waiting').style.display = 'block';
+			}
+		}
+
+		async function handleOffer(msg) {
+			try {
+				// Get TURN servers
+				const turnResponse = await fetch('/api/turn');
+				const turnConfig = await turnResponse.json();
+
+				const config = {
+					iceServers: turnConfig
+				};
+
+				pc = new RTCPeerConnection(config);
+
+				// Add tracks to video
+				pc.ontrack = (e) => {
+					console.log('Received track:', e.track.kind);
+					const video = document.getElementById('video');
+					if (video.srcObject !== e.streams[0]) {
+						video.srcObject = e.streams[0];
+						document.getElementById('waiting').style.display = 'none';
+						log('Connected - watching stream', 'connected');
+					}
+				};
+
+				pc.onicecandidate = (e) => {
+					if (e.candidate) {
+						ws.send(JSON.stringify({
+							type: 'candidate',
+							candidate: e.candidate
+						}));
+					}
+				};
+
+				pc.onconnectionstatechange = () => {
+					if (pc.connectionState === 'connected') {
+						log('Connected - watching stream', 'connected');
+					} else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+						log('Connection lost', 'disconnected');
+					}
+				};
+
+				// Set remote description (offer from streamer)
+				await pc.setRemoteDescription(new RTCSessionDescription({
+					type: 'offer',
+					sdp: msg.sdp
+				}));
+
+				// Create answer
+				const answer = await pc.createAnswer();
+				await pc.setLocalDescription(answer);
+
+				// Send answer back to streamer
+				ws.send(JSON.stringify({
+					type: 'answer',
+					sdp: answer.sdp
+				}));
+
+			} catch (err) {
+				console.error('Error handling offer:', err);
+				log('Connection error: ' + err.message, 'error');
+			}
+		}
+
+		function updateNetworkInfo() {
+			const networkInfo = document.getElementById('network-info');
+			const badge = streamerNetwork === 'local' ? '🏠 Local' : '🌐 External';
+			const badgeClass = streamerNetwork;
+			networkInfo.innerHTML = `<span class="network-badge ${badgeClass}">Streamer: ${badge}</span>`;
+		}
+
+		function log(msg, status = 'info') {
+			console.log(msg);
+			const statusText = document.getElementById('status-text');
+			const statusDot = document.getElementById('status-dot');
+
+			statusText.textContent = msg;
+
+			if (status === 'connected') {
+				statusDot.className = 'status-dot connected';
+			} else if (status === 'disconnected') {
+				statusDot.className = 'status-dot';
+			} else {
+				statusDot.className = 'status-dot';
+			}
+
+			if (status === 'error') {
+				const errorBox = document.getElementById('error-box');
+				errorBox.textContent = msg;
+				errorBox.style.display = 'block';
+				setTimeout(() => {
+					errorBox.style.display = 'none';
+				}, 5000);
+			}
+		}
+
+		// Start connecting
+		connect();
+	</script>
+</body>
+</html>

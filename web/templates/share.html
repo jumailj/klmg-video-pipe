@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Share Your Screen</title>
+	<style>
+		* { margin: 0; padding: 0; box-sizing: border-box; }
+		body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0e27; color: #fff; }
+		
+		.container {
+			width: 100%;
+			height: 100vh;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			padding: 20px;
+		}
+
+		video {
+			width: 90%;
+			max-width: 1200px;
+			height: auto;
+			background: #000;
+			border-radius: 8px;
+			display: none;
+		}
+
+		video.active {
+			display: block;
+		}
+
+		.controls {
+			margin-top: 20px;
+			text-align: center;
+		}
+
+		button {
+			padding: 12px 24px;
+			font-size: 16px;
+			background: #2563eb;
+			color: white;
+			border: none;
+			border-radius: 6px;
+			cursor: pointer;
+			transition: all 0.2s;
+		}
+
+		button:hover {
+			background: #1d4ed8;
+			transform: scale(1.05);
+		}
+
+		button:disabled {
+			background: #ccc;
+			cursor: not-allowed;
+			transform: none;
+		}
+
+		.info {
+			margin-top: 15px;
+			font-size: 14px;
+			color: #aaa;
+		}
+
+		.status {
+			margin-top: 10px;
+			padding: 8px 12px;
+			background: rgba(255, 255, 255, 0.1);
+			border-radius: 4px;
+			min-height: 20px;
+		}
+
+		.network-badge {
+			display: inline-block;
+			margin-left: 10px;
+			padding: 4px 8px;
+			background: rgba(255, 255, 255, 0.15);
+			border-radius: 4px;
+			font-size: 12px;
+			font-weight: 600;
+		}
+
+		.network-badge.local {
+			background: rgba(34, 197, 94, 0.2);
+			color: #86efac;
+		}
+
+		.network-badge.external {
+			background: rgba(59, 130, 246, 0.2);
+			color: #93c5fd;
+		}
+
+		.waiting {
+			text-align: center;
+			padding: 40px;
+		}
+
+		.spinner {
+			display: inline-block;
+			width: 8px;
+			height: 8px;
+			background: #2563eb;
+			border-radius: 50%;
+			animation: pulse 1.5s infinite;
+			margin-right: 8px;
+		}
+
+		@keyframes pulse {
+			0%, 100% { opacity: 0.4; transform: scale(1); }
+			50% { opacity: 1; transform: scale(1.2); }
+		}
+
+		.error {
+			color: #ff6b6b;
+			padding: 12px;
+			background: rgba(255, 107, 107, 0.1);
+			border-radius: 4px;
+			margin-top: 10px;
+		}
+
+		h2 {
+			margin-bottom: 10px;
+		}
+	</style>
+</head>
+<body>
+	<div class="container">
+		<h2>Share Your Screen <span class="network-badge" id="network-badge">...</span></h2>
+		
+		<video id="video" autoplay muted playsinline></video>
+		
+		<div id="waiting" class="waiting">
+			<span class="spinner"></span> Ready to share...
+		</div>
+
+		<div class="controls">
+			<button id="shareBtn" onclick="shareScreen()">Start Sharing</button>
+			<button id="stopBtn" onclick="stopSharing()" style="display:none; background:#dc2626;">Stop Sharing</button>
+		</div>
+
+		<div class="info">
+			<p>Your screen will be broadcast in high quality</p>
+			<div class="status" id="status">Connecting...</div>
+			<div class="error" id="error" style="display:none;"></div>
+		</div>
+	</div>
+
+	<script>
+		let pc = null;
+		let localStream = null;
+		const roomId = window.location.pathname.split('/share/')[1];
+		let ws = null;
+		let connecting = false;
+
+		// Get network type from server
+		async function getNetworkType() {
+			try {
+				const response = await fetch(`/api/network`);
+				const data = await response.json();
+				return data.network || 'unknown';
+			} catch (e) {
+				return 'unknown';
+			}
+		}
+
+		async function init() {
+			const network = await getNetworkType();
+			const badge = document.getElementById('network-badge');
+			badge.textContent = network === 'local' ? '🏠 Local' : '🌐 External';
+			badge.className = `network-badge ${network}`;
+
+			connect();
+		}
+
+		function connect() {
+			if (connecting || ws) return;
+			connecting = true;
+
+			const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+			ws = new WebSocket(`${protocol}//${window.location.host}/ws?room=${roomId}&role=streamer`);
+
+			ws.onopen = () => {
+				log('✓ Connected - Ready to share');
+				connecting = false;
+			};
+
+			ws.onmessage = (e) => {
+				const msg = JSON.parse(e.data);
+				handleMessage(msg);
+			};
+
+			ws.onerror = (err) => {
+				log('Connection error', 'error');
+				connecting = false;
+			};
+
+			ws.onclose = () => {
+				log('Reconnecting...');
+				ws = null;
+				connecting = false;
+				setTimeout(connect, 2000);
+			};
+		}
+
+		async function shareScreen() {
+			try {
+				localStream = await navigator.mediaDevices.getDisplayMedia({
+					video: {
+						cursor: 'always',
+						width: { ideal: 1920 },
+						height: { ideal: 1080 },
+						frameRate: { ideal: 30, max: 60 }
+					},
+					audio: {
+						echoCancellation: true,
+						noiseSuppression: true
+					}
+				});
+
+				const video = document.getElementById('video');
+				video.srcObject = localStream;
+				video.classList.add('active');
+
+				document.getElementById('waiting').style.display = 'none';
+				document.getElementById('shareBtn').style.display = 'none';
+				document.getElementById('stopBtn').style.display = 'inline-block';
+
+				log('✓ Screen sharing started');
+
+				// Handle stop
+				localStream.getTracks().forEach(track => {
+					track.onended = () => stopSharing();
+				});
+
+				// Create peer connection and send offer
+				await createPeerConnection();
+
+			} catch (err) {
+				if (err.name !== 'NotAllowedError') {
+					error('Error: ' + err.message);
+				}
+				log('Sharing cancelled');
+			}
+		}
+
+		async function createPeerConnection() {
+			// Get TURN servers
+			const turnResponse = await fetch('/api/turn');
+			const turnConfig = await turnResponse.json();
+
+			const config = {
+				iceServers: turnConfig
+			};
+
+			pc = new RTCPeerConnection(config);
+
+			// Add audio tracks
+			localStream.getAudioTracks().forEach(track => {
+				pc.addTrack(track, localStream);
+			});
+
+			// Add video tracks with quality settings
+			localStream.getVideoTracks().forEach(track => {
+				const sender = pc.addTrack(track, localStream);
+				
+				// Set bandwidth limits
+				const parameters = sender.getParameters();
+				if (!parameters.encodings) {
+					parameters.encodings = [{}];
+				}
+				parameters.encodings[0].maxBitrate = 5000000; // 5Mbps for video
+				sender.setParameters(parameters);
+			});
+
+			// Send offer when ready
+			pc.onicecandidate = (e) => {
+				if (e.candidate) {
+					ws.send(JSON.stringify({
+						type: 'candidate',
+						candidate: e.candidate
+					}));
+				}
+			};
+
+			pc.onconnectionstatechange = () => {
+				if (pc.connectionState === 'connected') {
+					log('✓ Streaming - viewers are connected');
+				}
+			};
+
+			const offer = await pc.createOffer();
+			await pc.setLocalDescription(offer);
+
+			ws.send(JSON.stringify({
+				type: 'offer',
+				sdp: offer.sdp
+			}));
+		}
+
+		async function handleMessage(msg) {
+			if (msg.type === 'answer' && pc) {
+				try {
+					await pc.setRemoteDescription(new RTCSessionDescription({
+						type: 'answer',
+						sdp: msg.sdp
+					}));
+				} catch (err) {
+					console.error('Error setting remote description:', err);
+				}
+			} else if (msg.type === 'candidate' && pc) {
+				try {
+					await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+				} catch (err) {
+					console.error('Error adding ICE candidate:', err);
+				}
+			}
+		}
+
+		function stopSharing() {
+			if (localStream) {
+				localStream.getTracks().forEach(track => track.stop());
+				localStream = null;
+			}
+
+			if (pc) {
+				pc.close();
+				pc = null;
+			}
+
+			const video = document.getElementById('video');
+			video.srcObject = null;
+			video.classList.remove('active');
+
+			document.getElementById('waiting').style.display = 'block';
+			document.getElementById('shareBtn').style.display = 'inline-block';
+			document.getElementById('stopBtn').style.display = 'none';
+
+			log('Sharing stopped - Click Start Sharing again');
+		}
+
+		function log(msg, level = 'info') {
+			console.log(msg);
+			const status = document.getElementById('status');
+			if (level === 'error') {
+				error(msg);
+			} else {
+				status.textContent = msg;
+			}
+		}
+
+		function error(msg) {
+			console.error(msg);
+			const err = document.getElementById('error');
+			err.textContent = msg;
+			err.style.display = 'block';
+		}
+
+		init();
+	</script>
+</body>
+</html>

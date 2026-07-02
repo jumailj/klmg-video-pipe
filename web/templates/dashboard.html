@@ -26,13 +26,13 @@
 </div>
 
 <table>
-  <thead><tr><th>Name</th><th>Player link (send to player)</th><th>OBS link (browser source)</th><th></th></tr></thead>
+  <thead><tr><th>Stream Name</th><th>Streamer Link (Share)</th><th>Viewer Link (Watch)</th><th></th></tr></thead>
   <tbody id="rows">
     {{range .Players}}
     <tr data-id="{{.ID}}">
       <td>{{.Name}}</td>
-      <td><div class="link">http://{{$.Host}}/play/{{.ID}}</div><span class="copy" onclick="copyText('http://{{$.Host}}/play/{{.ID}}')">copy</span></td>
-      <td><div class="link">http://{{$.Host}}/obs/{{.ID}}</div><span class="copy" onclick="copyText('http://{{$.Host}}/obs/{{.ID}}')">copy</span></td>
+      <td><div class="link">http://{{$.Host}}/share/{{.ID}}</div><span class="copy" onclick="copyText('http://{{$.Host}}/share/{{.ID}}')">copy</span></td>
+      <td><div class="link">http://{{$.Host}}/watch/{{.ID}}</div><span class="copy" onclick="copyText('http://{{$.Host}}/watch/{{.ID}}')">copy</span></td>
       <td><button class="del" onclick="del('{{.ID}}')">delete</button></td>
     </tr>
     {{end}}
@@ -40,9 +40,10 @@
 </table>
 
 <p style="opacity:.6;font-size:12px;margin-top:24px">
-  1. Create a link and send the "player link" to the streamer.<br>
-  2. They open it, the browser asks them to pick what to share, and sharing starts automatically.<br>
-  3. Add the "OBS link" as a Browser Source in OBS (one source per player) to see their shared screen with their name overlaid.
+  1. Create a stream and share the "Streamer Link" with whoever is sharing their screen.<br>
+  2. They open it, pick what to share, and it starts automatically.<br>
+  3. Send the "Viewer Link" to everyone who wants to watch the stream.<br>
+  4. They click it and see the video in full screen quality.
 </p>
 
 <script>

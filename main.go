@@ -38,8 +38,9 @@ func main() {
 	mux.HandleFunc("/", handleDashboard)
 	mux.HandleFunc("/api/players", handlePlayersAPI)
 	mux.HandleFunc("/api/turn", handleTURNAPI)
-	mux.HandleFunc("/play/", handlePlayerPage)
-	mux.HandleFunc("/obs/", handleObsPage)
+	mux.HandleFunc("/api/network", handleNetworkAPI)
+	mux.HandleFunc("/share/", handleSharePage)
+	mux.HandleFunc("/watch/", handleWatchPage)
 	mux.HandleFunc("/ws", hub.ServeWS)
 
 	log.Println("VOD dashboard listening on", *addr)
@@ -83,36 +84,40 @@ func handlePlayersAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handlePlayerPage(w http.ResponseWriter, r *http.Request) {
+func handleSharePage(w http.ResponseWriter, r *http.Request) {
 	id := filepath.Base(r.URL.Path)
 	p, ok := store.Get(id)
 	if !ok {
-		http.Error(w, "unknown player link", http.StatusNotFound)
+		http.Error(w, "unknown stream link", http.StatusNotFound)
 		return
 	}
-	data := struct {
-		*Player
-		TurnConfig TURNConfig
-	}{p, GetTURNConfig()}
-	templates.ExecuteTemplate(w, "player.html", data)
+	if err := templates.ExecuteTemplate(w, "share.html", p); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
-func handleObsPage(w http.ResponseWriter, r *http.Request) {
+func handleWatchPage(w http.ResponseWriter, r *http.Request) {
 	id := filepath.Base(r.URL.Path)
 	p, ok := store.Get(id)
 	if !ok {
-		http.Error(w, "unknown player link", http.StatusNotFound)
+		http.Error(w, "unknown stream link", http.StatusNotFound)
 		return
 	}
-	data := struct {
-		*Player
-		TurnConfig TURNConfig
-	}{p, GetTURNConfig()}
-	templates.ExecuteTemplate(w, "obs.html", data)
+	if err := templates.ExecuteTemplate(w, "watch.html", p); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func handleTURNAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(GetTURNConfig())
+}
+
+func handleNetworkAPI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	network := getNetworkType(r.RemoteAddr, r.Header)
+	json.NewEncoder(w).Encode(map[string]string{
+		"network": network,
+	})
 }
 
