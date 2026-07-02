@@ -161,14 +161,19 @@ func (h *Hub) unregisterClient(c *Client) {
 func (h *Hub) relay(c *Client, raw []byte) {
 	var msg map[string]interface{}
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		log.Printf("[RELAY] Invalid JSON: %v", err)
 		return
 	}
+
+	msgType, _ := msg["type"].(string)
+	log.Printf("[RELAY] %s sending %s message", c.role, msgType)
 
 	h.mu.RLock()
 	room, exists := h.rooms[c.room]
 	h.mu.RUnlock()
 
 	if !exists {
+		log.Printf("[RELAY] Room %s doesn't exist", c.room)
 		return
 	}
 
@@ -181,10 +186,12 @@ func (h *Hub) relay(c *Client, raw []byte) {
 		for viewer := range room.viewers {
 			select {
 			case viewer.send <- raw:
+				log.Printf("[ROOM %s] Offer sent to viewer", c.room)
 			default:
-				log.Printf("[ROOM %s] Viewer send buffer full, dropping message", c.room)
+				log.Printf("[ROOM %s] Viewer send buffer full, dropping offer", c.room)
 			}
 		}
+		return
 	}
 
 	// Viewer sends answer/candidate to streamer
@@ -192,11 +199,17 @@ func (h *Hub) relay(c *Client, raw []byte) {
 		if room.streamer != nil {
 			select {
 			case room.streamer.send <- raw:
+				log.Printf("[ROOM %s] %s sent to streamer", c.room, msgType)
 			default:
-				log.Printf("[ROOM %s] Streamer send buffer full, dropping message", c.room)
+				log.Printf("[ROOM %s] Streamer send buffer full, dropping %s", c.room, msgType)
 			}
+		} else {
+			log.Printf("[ROOM %s] No streamer to send %s to", c.room, msgType)
 		}
+		return
 	}
+
+	log.Printf("[RELAY] Message type %s from role %s not handled", msgType, c.role)
 }
 
 func getNetworkType(remoteAddr string, headers http.Header) string {

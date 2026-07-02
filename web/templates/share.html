@@ -208,6 +208,9 @@
 
 		async function shareScreen() {
 			try {
+				console.log('Streamer: Start Sharing button clicked');
+				
+				console.log('Streamer: Requesting display media...');
 				localStream = await navigator.mediaDevices.getDisplayMedia({
 					video: {
 						cursor: 'always',
@@ -221,6 +224,8 @@
 					}
 				});
 
+				console.log('Streamer: Display media granted, got ' + localStream.getTracks().length + ' tracks');
+				
 				const video = document.getElementById('video');
 				video.srcObject = localStream;
 				video.classList.add('active');
@@ -237,9 +242,12 @@
 				});
 
 				// Create peer connection and send offer
+				console.log('Streamer: About to create peer connection');
 				await createPeerConnection();
+				console.log('Streamer: Peer connection created, offer sent');
 
 			} catch (err) {
+				console.error('Streamer: shareScreen error:', err.name, err.message);
 				if (err.name !== 'NotAllowedError') {
 					error('Error: ' + err.message);
 				}
@@ -248,62 +256,78 @@
 		}
 
 		async function createPeerConnection() {
-			// Get TURN servers
-			const turnResponse = await fetch('/api/turn');
-			const turnData = await turnResponse.json();
+			try {
+				// Get TURN servers
+				console.log('Streamer: Fetching TURN config...');
+				const turnResponse = await fetch('/api/turn');
+				const turnData = await turnResponse.json();
+				console.log('Streamer: Got ' + turnData.servers.length + ' TURN servers');
 
-			const config = {
-				iceServers: turnData.servers
-			};
+				const config = {
+					iceServers: turnData.servers
+				};
 
-			pc = new RTCPeerConnection(config);
+				console.log('Streamer: Creating RTCPeerConnection...');
+				pc = new RTCPeerConnection(config);
 
-			// Add audio tracks
-			localStream.getAudioTracks().forEach(track => {
-				pc.addTrack(track, localStream);
-			});
+				// Add audio tracks
+				localStream.getAudioTracks().forEach(track => {
+					console.log('Streamer: Adding audio track');
+					pc.addTrack(track, localStream);
+				});
 
-			// Add video tracks with quality settings
-			localStream.getVideoTracks().forEach(track => {
-				const sender = pc.addTrack(track, localStream);
-				
-				// Set bandwidth limits
-				const parameters = sender.getParameters();
-				if (!parameters.encodings) {
-					parameters.encodings = [{}];
+				// Add video tracks with quality settings
+				localStream.getVideoTracks().forEach(track => {
+					console.log('Streamer: Adding video track');
+					const sender = pc.addTrack(track, localStream);
+					
+					// Set bandwidth limits
+					const parameters = sender.getParameters();
+					if (!parameters.encodings) {
+						parameters.encodings = [{}];
+					}
+					parameters.encodings[0].maxBitrate = 5000000; // 5Mbps for video
+					sender.setParameters(parameters);
+				});
+
+				// Send offer when ready
+				pc.onicecandidate = (e) => {
+					if (e.candidate) {
+						console.log('Streamer: Sending ICE candidate');
+						ws.send(JSON.stringify({
+							type: 'candidate',
+							candidate: e.candidate
+						}));
+					}
+				};
+
+				pc.onconnectionstatechange = () => {
+					console.log('Streamer connection state:', pc.connectionState);
+					if (pc.connectionState === 'connected') {
+						log('✓ Streaming - viewers are connected');
+					}
+				};
+
+				console.log('Streamer: Creating offer...');
+				const offer = await pc.createOffer();
+				console.log('Streamer: Offer created, setting local description');
+				await pc.setLocalDescription(offer);
+				console.log('Streamer: Sending offer with SDP length:', offer.sdp.length);
+
+				if (!ws || ws.readyState !== WebSocket.OPEN) {
+					console.error('Streamer: WebSocket not open! readyState=' + (ws ? ws.readyState : 'null'));
+					return;
 				}
-				parameters.encodings[0].maxBitrate = 5000000; // 5Mbps for video
-				sender.setParameters(parameters);
-			});
 
-			// Send offer when ready
-			pc.onicecandidate = (e) => {
-				if (e.candidate) {
-					console.log('Streamer sending ICE candidate');
-					ws.send(JSON.stringify({
-						type: 'candidate',
-						candidate: e.candidate
-					}));
-				}
-			};
-
-			pc.onconnectionstatechange = () => {
-				console.log('Streamer connection state:', pc.connectionState);
-				if (pc.connectionState === 'connected') {
-					log('✓ Streaming - viewers are connected');
-				}
-			};
-
-			console.log('Streamer: Creating offer...');
-			const offer = await pc.createOffer();
-			console.log('Streamer: Offer created, setting local description');
-			await pc.setLocalDescription(offer);
-			console.log('Streamer: Sending offer with SDP:', offer.sdp.substring(0, 100) + '...');
-
-			ws.send(JSON.stringify({
-				type: 'offer',
-				sdp: offer.sdp
-			}));
+				ws.send(JSON.stringify({
+					type: 'offer',
+					sdp: offer.sdp
+				}));
+				console.log('Streamer: Offer sent successfully');
+			} catch (err) {
+				console.error('Streamer: createPeerConnection error:', err.message);
+				error('Connection error: ' + err.message);
+			}
 		}
 
 		async function handleMessage(msg) {
