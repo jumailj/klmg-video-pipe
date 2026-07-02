@@ -182,20 +182,24 @@
 			ws.onopen = () => {
 				log('✓ Connected - Ready to share');
 				connecting = false;
+				console.log('WebSocket connected for streamer');
 			};
 
 			ws.onmessage = (e) => {
+				console.log('Streamer received message:', e.data);
 				const msg = JSON.parse(e.data);
 				handleMessage(msg);
 			};
 
 			ws.onerror = (err) => {
 				log('Connection error', 'error');
+				console.error('WebSocket error:', err);
 				connecting = false;
 			};
 
 			ws.onclose = () => {
 				log('Reconnecting...');
+				console.log('WebSocket closed');
 				ws = null;
 				connecting = false;
 				setTimeout(connect, 2000);
@@ -275,6 +279,7 @@
 			// Send offer when ready
 			pc.onicecandidate = (e) => {
 				if (e.candidate) {
+					console.log('Streamer sending ICE candidate');
 					ws.send(JSON.stringify({
 						type: 'candidate',
 						candidate: e.candidate
@@ -283,13 +288,17 @@
 			};
 
 			pc.onconnectionstatechange = () => {
+				console.log('Streamer connection state:', pc.connectionState);
 				if (pc.connectionState === 'connected') {
 					log('✓ Streaming - viewers are connected');
 				}
 			};
 
+			console.log('Streamer: Creating offer...');
 			const offer = await pc.createOffer();
+			console.log('Streamer: Offer created, setting local description');
 			await pc.setLocalDescription(offer);
+			console.log('Streamer: Sending offer with SDP:', offer.sdp.substring(0, 100) + '...');
 
 			ws.send(JSON.stringify({
 				type: 'offer',
