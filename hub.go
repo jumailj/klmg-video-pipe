@@ -24,6 +24,7 @@ type client struct {
 	send       chan []byte
 	mu         sync.Mutex
 	network    string // "local" or "external" based on IP
+	headers    http.Header // for detecting real IP through proxies
 }
 
 func (c *client) writeJSON(v interface{}) {
@@ -38,16 +39,45 @@ func (c *client) writeJSON(v interface{}) {
 }
 
 // getNetworkType determines if the peer is on a local or external network
-func getNetworkType(remoteAddr string) string {
-	ip := strings.Split(remoteAddr, ":")[0]
+// Checks X-Forwarded-For headers (for ngrok/proxies) first, then direct IP
+func getNetworkType(remoteAddr string, headers http.Header) string {
+	var ip string
+
+	// Check for X-Forwarded-For header (from ngrok, proxies, etc)
+	if forwardedFor := headers.Get("X-Forwarded-For"); forwardedFor != "" {
+		// X-Forwarded-For can have multiple IPs, take the first one
+		ips := strings.Split(forwardedFor, ",")
+		ip = strings.TrimSpace(ips[0])
+		log.Printf("getNetworkType: Using X-Forwarded-For: %s", ip)
+	} else if realIP := headers.Get("X-Real-IP"); realIP != "" {
+		// Fallback to X-Real-IP header
+		ip = realIP
+		log.Printf("getNetworkType: Using X-Real-IP: %s", ip)
+	} else {
+		// Use direct connection IP
+		// Handle both IPv4 and IPv6 addresses
+		host, _, err := net.SplitHostPort(remoteAddr)
+		if err != nil {
+			// If SplitHostPort fails, try to use the remoteAddr as-is
+			// This handles IPv6 addresses that might not have a port
+			host = remoteAddr
+		}
+		ip = host
+		log.Printf("getNetworkType: Using RemoteAddr: %s (full: %s)", ip, remoteAddr)
+	}
+
+	// Parse the IP
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
+		log.Printf("getNetworkType: Could not parse IP: %s", ip)
 		return "unknown"
 	}
 
 	if parsedIP.IsLoopback() || parsedIP.IsPrivate() {
+		log.Printf("getNetworkType: %s is PRIVATE/LOOPBACK", parsedIP.String())
 		return "local"
 	}
+	log.Printf("getNetworkType: %s is PUBLIC/EXTERNAL", parsedIP.String())
 	return "external"
 }
 
@@ -80,8 +110,8 @@ func (h *Hub) join(c *client) {
 		h.streamers[c.room] = make(map[string]*Streamer)
 	}
 
-	// Detect network type
-	c.network = getNetworkType(c.conn.RemoteAddr().String())
+	// Detect network type (check headers for real IP through proxies)
+	c.network = getNetworkType(c.conn.RemoteAddr().String(), c.headers)
 
 	log.Printf("[JOIN] room=%s role=%s network=%s", c.room, c.role, c.network)
 
@@ -264,6 +294,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		room:       room,
 		streamerID: streamerID,
 		send:       make(chan []byte, 16),
+		headers:    r.Header,
 	}
 	h.join(c)
 
