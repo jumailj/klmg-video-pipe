@@ -3,23 +3,27 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
 )
 
-// A room has exactly one "player" (screen sharer) and one or more "obs"
+// A room has multiple "streamer" peers (screen sharers) and one or more "obs"
 // viewers (OBS browser sources). The hub just relays SDP/ICE JSON messages
-// between the peers in a room - all real WebRTC media negotiation happens
-// browser-to-browser.
+// between the peers - all real WebRTC media negotiation happens P2P.
+// Multiple streamers can exist, OBS viewers can connect to any of them.
 
 type client struct {
-	conn *websocket.Conn
-	role string // "player" or "obs"
-	room string
-	send chan []byte
-	mu   sync.Mutex
+	conn       *websocket.Conn
+	role       string // "streamer" or "obs"
+	room       string
+	streamerID string // unique ID for this streamer (empty if role is "obs")
+	send       chan []byte
+	mu         sync.Mutex
+	network    string // "local" or "external" based on IP
 }
 
 func (c *client) writeJSON(v interface{}) {
@@ -33,59 +37,199 @@ func (c *client) writeJSON(v interface{}) {
 	}
 }
 
+// getNetworkType determines if the peer is on a local or external network
+func getNetworkType(remoteAddr string) string {
+	ip := strings.Split(remoteAddr, ":")[0]
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return "unknown"
+	}
+
+	if parsedIP.IsLoopback() || parsedIP.IsPrivate() {
+		return "local"
+	}
+	return "external"
+}
+
+type Streamer struct {
+	ID      string `json:"id"`
+	Network string `json:"network"` // "local" or "external"
+}
+
 type Hub struct {
-	mu    sync.Mutex
-	rooms map[string]map[*client]bool
+	mu       sync.Mutex
+	rooms    map[string]map[*client]bool         // room -> clients
+	streamers map[string]map[string]*Streamer    // room -> streamerID -> Streamer info
 }
 
 func NewHub() *Hub {
-	return &Hub{rooms: make(map[string]map[*client]bool)}
+	return &Hub{
+		rooms:     make(map[string]map[*client]bool),
+		streamers: make(map[string]map[string]*Streamer),
+	}
 }
 
 func (h *Hub) join(c *client) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	if h.rooms[c.room] == nil {
 		h.rooms[c.room] = make(map[*client]bool)
 	}
-	// tell existing peers a new peer joined, and tell the new peer about
-	// existing peers so it knows whether to start the offer.
-	for other := range h.rooms[c.room] {
-		other.writeJSON(map[string]string{"type": "peer-joined", "role": c.role})
-		c.writeJSON(map[string]string{"type": "peer-joined", "role": other.role})
+	if h.streamers[c.room] == nil {
+		h.streamers[c.room] = make(map[string]*Streamer)
 	}
+
+	// Detect network type
+	c.network = getNetworkType(c.conn.RemoteAddr().String())
+
+	log.Printf("[JOIN] room=%s role=%s network=%s", c.room, c.role, c.network)
+
+	if c.role == "streamer" {
+		// Register this streamer
+		h.streamers[c.room][c.streamerID] = &Streamer{
+			ID:      c.streamerID,
+			Network: c.network,
+		}
+		log.Printf("[STREAMER JOINED] room=%s streamer=%s network=%s", c.room, c.streamerID, c.network)
+
+		// Tell all OBS viewers a new streamer joined
+		for other := range h.rooms[c.room] {
+			if other.role == "obs" {
+				other.writeJSON(map[string]interface{}{
+					"type":       "streamer-joined",
+					"streamerId": c.streamerID,
+					"network":    c.network,
+				})
+				log.Printf("[NOTIFY OBS] about new streamer %s", c.streamerID)
+			}
+		}
+	}
+
+	// Tell new peer about all existing streamers
+	count := 0
+	for sid, streamer := range h.streamers[c.room] {
+		c.writeJSON(map[string]interface{}{
+			"type":       "streamer-list",
+			"streamerId": sid,
+			"network":    streamer.Network,
+		})
+		count++
+	}
+	if count > 0 {
+		log.Printf("[STREAMER LIST] sent %d streamers to %s in room %s", count, c.role, c.room)
+	}
+
 	h.rooms[c.room][c] = true
-	h.mu.Unlock()
+	log.Printf("[ROOM STATE] room=%s total_peers=%d total_streamers=%d", c.room, len(h.rooms[c.room]), len(h.streamers[c.room]))
 }
 
 func (h *Hub) leave(c *client) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	log.Printf("[LEAVE] room=%s role=%s", c.room, c.role)
+
 	if peers, ok := h.rooms[c.room]; ok {
 		delete(peers, c)
-		for other := range peers {
-			other.writeJSON(map[string]string{"type": "peer-left", "role": c.role})
+
+		if c.role == "streamer" {
+			// Remove from streamers list
+			delete(h.streamers[c.room], c.streamerID)
+			log.Printf("[STREAMER LEFT] room=%s streamer=%s", c.room, c.streamerID)
+
+			// Notify all OBS viewers that this streamer left
+			for other := range peers {
+				if other.role == "obs" {
+					other.writeJSON(map[string]interface{}{
+						"type":       "streamer-left",
+						"streamerId": c.streamerID,
+					})
+					log.Printf("[NOTIFY OBS] streamer %s left", c.streamerID)
+				}
+			}
 		}
+
 		if len(peers) == 0 {
 			delete(h.rooms, c.room)
+			delete(h.streamers, c.room)
+			log.Printf("[ROOM DELETED] room=%s (no more peers)", c.room)
 		}
 	}
-	h.mu.Unlock()
 	close(c.send)
 }
 
-// relay forwards a raw signaling message to every other client in the room.
+// relay forwards a signaling message to target peer(s).
+// Messages from OBS targeting a streamer are routed to that streamer.
+// Messages from streamers are routed to all connected OBS viewers.
 func (h *Hub) relay(c *client, raw []byte) {
+	var msg map[string]interface{}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		log.Printf("relay: unmarshal error: %v", err)
+		return
+	}
+
+	msgType, _ := msg["type"].(string)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for other := range h.rooms[c.room] {
-		if other == c {
-			continue
+
+	peers := h.rooms[c.room]
+	if len(peers) == 0 {
+		log.Printf("relay: no peers in room %s", c.room)
+		return
+	}
+
+	if c.role == "obs" {
+		// OBS sending to a specific streamer
+		targetStreamerID, _ := msg["targetStreamerId"].(string)
+		if targetStreamerID == "" {
+			log.Printf("relay: OBS message missing targetStreamerId, type=%s", msgType)
+			return
 		}
-		select {
-		case other.send <- raw:
-		default:
+
+		log.Printf("relay: OBS->Streamer, type=%s, target=%s", msgType, targetStreamerID)
+
+		found := false
+		for other := range peers {
+			if other.streamerID == targetStreamerID {
+				found = true
+				select {
+				case other.send <- raw:
+					log.Printf("relay: sent to streamer %s", targetStreamerID)
+				default:
+					log.Printf("relay: streamer %s send channel full", targetStreamerID)
+				}
+				break
+			}
+		}
+		if !found {
+			log.Printf("relay: streamer %s not found in room %s", targetStreamerID, c.room)
+		}
+	} else if c.role == "streamer" {
+		// Streamer sending ICE/SDP to all connected OBS viewers
+		msg["streamerId"] = c.streamerID
+		enriched, _ := json.Marshal(msg)
+
+		log.Printf("relay: Streamer->OBS, type=%s, streamer=%s", msgType, c.streamerID)
+
+		count := 0
+		for other := range peers {
+			if other.role == "obs" {
+				count++
+				select {
+				case other.send <- enriched:
+					log.Printf("relay: sent to OBS viewer %d", count)
+				default:
+					log.Printf("relay: OBS viewer %d send channel full", count)
+				}
+			}
+		}
+		if count == 0 {
+			log.Printf("relay: no OBS viewers in room %s", c.room)
 		}
 	}
 }
+
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
@@ -96,8 +240,15 @@ var upgrader = websocket.Upgrader{
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	room := r.URL.Query().Get("room")
 	role := r.URL.Query().Get("role")
-	if room == "" || (role != "player" && role != "obs") {
-		http.Error(w, "room and role=player|obs are required", http.StatusBadRequest)
+	streamerID := r.URL.Query().Get("streamerId")
+
+	if room == "" || (role != "streamer" && role != "obs") {
+		http.Error(w, "room and role=streamer|obs are required", http.StatusBadRequest)
+		return
+	}
+
+	if role == "streamer" && streamerID == "" {
+		http.Error(w, "streamerId is required for role=streamer", http.StatusBadRequest)
 		return
 	}
 
@@ -107,7 +258,13 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c := &client{conn: conn, role: role, room: room, send: make(chan []byte, 16)}
+	c := &client{
+		conn:       conn,
+		role:       role,
+		room:       room,
+		streamerID: streamerID,
+		send:       make(chan []byte, 16),
+	}
 	h.join(c)
 
 	go c.writePump()
@@ -124,9 +281,11 @@ func (c *client) readPump(h *Hub) {
 		if err != nil {
 			return
 		}
+
 		h.relay(c, msg)
 	}
 }
+
 
 func (c *client) writePump() {
 	defer c.conn.Close()

@@ -20,7 +20,13 @@ func main() {
 	flag.Parse()
 
 	var err error
-	templates, err = template.ParseGlob(filepath.Join("web", "templates", "*.html"))
+	funcMap := template.FuncMap{
+		"json": func(v interface{}) template.JS {
+			b, _ := json.Marshal(v)
+			return template.JS(b)
+		},
+	}
+	templates, err = template.New("").Funcs(funcMap).ParseGlob(filepath.Join("web", "templates", "*.html"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -31,6 +37,7 @@ func main() {
 
 	mux.HandleFunc("/", handleDashboard)
 	mux.HandleFunc("/api/players", handlePlayersAPI)
+	mux.HandleFunc("/api/turn", handleTURNAPI)
 	mux.HandleFunc("/play/", handlePlayerPage)
 	mux.HandleFunc("/obs/", handleObsPage)
 	mux.HandleFunc("/ws", hub.ServeWS)
@@ -83,7 +90,11 @@ func handlePlayerPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown player link", http.StatusNotFound)
 		return
 	}
-	templates.ExecuteTemplate(w, "player.html", p)
+	data := struct {
+		*Player
+		TurnConfig TURNConfig
+	}{p, GetTURNConfig()}
+	templates.ExecuteTemplate(w, "player.html", data)
 }
 
 func handleObsPage(w http.ResponseWriter, r *http.Request) {
@@ -93,5 +104,15 @@ func handleObsPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown player link", http.StatusNotFound)
 		return
 	}
-	templates.ExecuteTemplate(w, "obs.html", p)
+	data := struct {
+		*Player
+		TurnConfig TURNConfig
+	}{p, GetTURNConfig()}
+	templates.ExecuteTemplate(w, "obs.html", data)
 }
+
+func handleTURNAPI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(GetTURNConfig())
+}
+

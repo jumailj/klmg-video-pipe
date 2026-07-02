@@ -1,31 +1,99 @@
-# VOD Dashboard (Go)
+# VOD Dashboard (Go) - Multi-Streamer P2P with TURN
 
-Minimal dashboard to generate per-player links. A player opens their link, the
-browser asks them to pick something to share, and their video streams live
-via WebRTC into an OBS Browser Source labeled with their name.
+Advanced dashboard supporting multiple concurrent streamers feeding into a single OBS instance.
+Each streamer is identified uniquely and detected for local/external network connectivity.
 
-No database, no external services besides a public STUN server for NAT
-traversal. Pure Go standard library + `gorilla/websocket` for signaling only
-— actual video never touches the Go process, it flows browser-to-browser
-(player → OBS), so it works fine over LAN or the internet.
+**Key Features:**
+- **Multi-Streamer Support** - Multiple users can stream simultaneously to one OBS instance
+- **Peer-to-Peer (P2P)** - No media flows through the server (just WebRTC signaling)
+- **TURN Server Integration** - Automatic NAT traversal using Google/Twilio TURN servers for cross-network streaming
+- **Network Detection** - Automatic detection of whether peers are on local or external networks
+- **No External Services** - Built entirely with Go + `gorilla/websocket`
 
 ## How it works
 
+### Dashboard Setup
 1. Open the dashboard (`/`), type a player name, click **Create link**.
-2. You get two links:
-   - **Player link** (`/play/<id>`) — send this to the player. When they
-     open it and click "Start sharing", the browser's native screen-share
-     picker opens.
-   - **OBS link** (`/obs/<id>`) — add this as a **Browser Source** in OBS
-     (one source per player). It shows their shared video with their name
-     overlaid in the corner.
-3. The Go server only relays WebRTC signaling messages (SDP/ICE) over a
-   WebSocket at `/ws?room=<id>&role=player|obs` — it pairs up the player and
-   the matching OBS source automatically.
+2. You receive two links:
+   - **Streamer link** (`/play/<id>`) — Send to each screen-sharer. When opened and "Start sharing" is clicked, the browser's native screen-share picker opens.
+   - **OBS link** (`/obs/<id>`) — Add as a **Browser Source** in OBS. Displays available streamers with network info (🏠 Local or 🌐 External). Click any streamer to connect.
 
-Note: each room supports one player + one OBS viewer at a time (i.e. one
-browser source per player in your OBS scene, which matches the intended
-use). If the OBS source reloads, it auto-reconnects and re-negotiates.
+### Multi-Streamer Workflow
+1. Multiple users open their **Streamer link** and start sharing
+2. Open the **OBS link** in a browser source - a dropdown shows all active streamers
+3. Click a streamer to connect and receive their screen
+4. Switch between streamers by clicking different buttons
+5. The server relays only signaling messages (SDP/ICE); video flows P2P
+
+### Network Detection
+- **Local Network** (🏠) - Peer uses private IP (e.g., 192.168.x.x) on your LAN
+- **External Network** (🌐) - Peer uses public IP from outside your network
+  - Automatically uses TURN servers for NAT traversal
+
+## Architecture
+
+```
+┌─────────────────┐
+│  Streamer 1     │
+│  (Browser)      │
+└────────┬────────┘
+         │ WebRTC P2P
+         │
+    ┌────┴─────────────┐
+    │  Server (Hub)    │  ← Relays only WebRTC signaling
+    │  - Tracks rooms  │     (SDP, ICE candidates)
+    │  - Tracks peers  │
+    └────┬─────────────┘
+         │ WebRTC P2P
+    ┌────┴────────────────────────┐
+    │  OBS Browser Source         │
+    │  (Connected to Streamer 1)  │
+    └─────────────────────────────┘
+
+    └─────────────────────────────────────┐
+    │  Another Streamer can join anytime  │
+    │  OBS can switch between them        │
+    └─────────────────────────────────────┘
+```
+
+## TURN Server Configuration
+
+The app automatically uses public TURN servers:
+- **Google STUN** - For basic NAT detection (free, no credentials needed)
+- **Twilio TURN** - For NAT traversal (public server, credentials provided)
+- **Bistri TURN** - Backup option
+
+These enable streaming between peers on different networks without needing a private TURN server.
+
+## API Endpoints
+
+- `GET /` - Dashboard
+- `POST /api/players` - Create new player (JSON: `{"name": "Player Name"}`)
+- `GET /api/players` - List all players
+- `DELETE /api/players?id=<id>` - Delete player
+- `GET /api/turn` - Get TURN/STUN configuration
+- `GET /play/<id>` - Streamer page
+- `GET /obs/<id>` - OBS viewer page
+- `GET /ws?room=<id>&role=streamer&streamerId=<uid>` - WebSocket for streamers
+- `GET /ws?room=<id>&role=obs` - WebSocket for OBS viewers
+
+## WebSocket Message Types
+
+### From Streamer:
+- `{"type": "offer", "sdp": {...}}` - WebRTC offer
+- `{"type": "candidate", "candidate": {...}}` - ICE candidate
+
+### From OBS:
+- `{"type": "answer", "sdp": {...}, "targetStreamerId": "<uid>"}` - WebRTC answer
+- `{"type": "candidate", "candidate": {...}, "streamerId": "<uid>"}` - ICE candidate
+
+### From Hub to OBS:
+- `{"type": "streamer-list", "streamerId": "<uid>", "network": "local|external"}`
+- `{"type": "streamer-joined", "streamerId": "<uid>", "network": "local|external"}`
+- `{"type": "streamer-left", "streamerId": "<uid>"}`
+
+### From Hub to Streamer:
+- `{"type": "streamer-list", "streamerId": "<uid>", "network": "local|external"}` - Other active streamers
 
 ## Build
 

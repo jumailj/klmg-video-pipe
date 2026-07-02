@@ -1,0 +1,187 @@
+# Quick Reference Card
+
+## Connection Flow (Fixed)
+
+```
+BEFORE (Broken):
+Streamer connects → Hub updates → OBS can't trigger offer
+(Offer never sent unless OBS was already connected)
+
+AFTER (Fixed):
+OBS clicks "Select Streamer"
+  ↓
+Hub receives {type: "select-streamer", targetStreamerId: "xxx"}
+  ↓
+Hub routes to matching Streamer
+  ↓
+Streamer receives message
+  ↓
+Streamer calls makeOffer()
+  ↓
+Offer sent to OBS
+  ↓
+OBS receives offer & sends answer
+  ↓
+✅ WebRTC connection established
+```
+
+## Server Commands
+
+```powershell
+# Start server
+cd c:\Users\jumai\Downloads\new-test\app
+.\vodapp.exe
+
+# Kill existing instance if port in use
+Get-Process vodapp | Stop-Process -Force
+
+# View recent logs (if saved to file)
+Get-Content debug.log -Tail 50
+```
+
+## URLs Pattern
+
+```
+Dashboard:     http://localhost:8080/
+Streamer Page: http://localhost:8080/play/4cda629f83e7
+OBS Page:      http://localhost:8080/obs/4cda629f83e7
+TURN Config:   http://localhost:8080/api/turn
+
+With ngrok:
+https://abc123.ngrok.io/play/4cda629f83e7
+https://abc123.ngrok.io/obs/4cda629f83e7
+```
+
+## Browser Console Checks (F12)
+
+```javascript
+// Check WebSocket connection
+ws.readyState  // 1 = open
+
+// See all messages
+console.log messages show: "Streamer received:", "OBS received:"
+
+// Check if TURN config loaded
+turnConfig  // Should show array of servers
+
+// Check connection state
+pc.connectionState  // Should be "connected" when working
+
+// Manually test TURN
+// Set breakpoint and check ICE candidates
+```
+
+## Quality Settings (player.html)
+
+```javascript
+// Current settings for high quality:
+// Video: 5 Mbps (1920x1080 @ 30-60 fps)
+// Audio: 256 Kbps
+
+// To modify: search for "maxBitrate" in player.html
+params.encodings[0].maxBitrate = 5000000;  // Change this number
+// 2000000 = 2 Mbps (for slower networks)
+// 10000000 = 10 Mbps (for high quality)
+```
+
+## Server Logs to Recognize
+
+```
+✅ Working:
+[JOIN] room=abc role=streamer network=external
+[JOIN] room=abc role=obs network=external
+relay: OBS->Streamer, type=select-streamer
+relay: sent to streamer xxx
+relay: Streamer->OBS, type=offer
+
+❌ Problems:
+"bind: Only one usage" → Port 8080 in use, kill process
+relay: streamer xxx not found → Wrong room ID
+relay: no OBS viewers in room → OBS hasn't connected yet
+```
+
+## TURN Servers (config.go)
+
+```
+Primary:  Google STUN (free, detection only)
+Backup 1: Bistri TURN (port 80/443)
+Backup 2: Twilio TURN (port 443)
+Backup 3: OpenRelay (free, public)
+```
+
+## Test Scenario
+
+```
+1. Server: .\vodapp.exe
+   ↓ Watch for: "VOD dashboard listening on :8080"
+
+2. Browser 1 (Streamer):
+   → http://localhost:8080/
+   → Create link, get /play/ID
+   → Click "Start sharing my screen"
+   → Select screen/window
+   ↓ Watch for: "Streamer ID: xxx"
+
+3. Browser 2 (OBS):
+   → http://localhost:8080/obs/ID (same ID as streamer)
+   → See dropdown with streamer
+   → Click streamer name
+   ↓ Watch for: "Connecting to: xxx"
+
+4. ✅ Video appears in Browser 2
+```
+
+## Ngrok Test
+
+```bash
+# Terminal 1: Start ngrok
+ngrok http 8080
+
+# Terminal 2: Start server (as normal)
+.\vodapp.exe
+
+# Browser: Use ngrok URL
+https://abc123.ngrok.io/play/ID
+https://abc123.ngrok.io/obs/ID
+```
+
+## If It's Still Not Working
+
+1. **Check server is actually running**
+   - Look for: "VOD dashboard listening on :8080"
+   - If not, port 8080 in use → kill vodapp process
+
+2. **Check WebSocket connects**
+   - Browser F12 → Network tab → WS
+   - Should see: wss://localhost:8080/ws?room=...
+
+3. **Check message flow**
+   - Streamer console: Look for "OBS selecting this streamer"
+   - OBS console: Look for received messages
+   - Server logs: Look for relay messages
+
+4. **Check network is accessible**
+   - Can ping: localhost:8080 (curl http://localhost:8080/)
+   - With ngrok: is tunnel still active? (no timeout)
+
+5. **Last resort**
+   - Kill process: `Get-Process vodapp | Stop-Process -Force`
+   - Rebuild: `go build`
+   - Restart: `.\vodapp.exe`
+   - Clear browser cache (Ctrl+Shift+Delete)
+
+## Files to Know
+
+```
+hub.go          - Core message routing (relay function)
+player.html     - Streamer WebRTC setup (makeOffer)
+obs.html        - OBS WebRTC setup (handleOffer, selectStreamer)
+config.go       - TURN server list
+TROUBLESHOOTING.md - Detailed debugging guide
+FIX_SUMMARY.md  - What was fixed
+```
+
+---
+**Last Updated:** 2026-07-03
+**Status:** ✅ Multi-Streamer P2P Ready
+**Key Fix:** OBS "select-streamer" message now properly triggers streamer offer

@@ -9,27 +9,46 @@
   button:disabled{background:#333;cursor:default}
   video{margin-top:20px;width:60vw;max-width:640px;border-radius:8px;border:1px solid #333}
   #status{margin-top:14px;font-size:13px;opacity:.7}
+  .info-box{margin-top:20px;padding:12px;border-radius:6px;background:rgba(79,124,255,0.1);border:1px solid #4f7cff;font-size:12px}
+  .network{color:#888;margin-top:8px}
 </style>
 </head>
 <body>
-  <h2>{{.Name}}</h2>
+  <h2>{{.Name}} (Streamer)</h2>
   <button id="startBtn">Start sharing my screen</button>
   <video id="preview" autoplay muted playsinline></video>
   <div id="status">not sharing</div>
+  <div id="info" class="info-box" style="display:none"></div>
 
 <script>
 const roomID = "{{.ID}}";
+const streamerID = Math.random().toString(36).substr(2, 9);
 const proto = location.protocol === "https:" ? "wss" : "ws";
+const turnConfig = {{.TurnConfig | json}};
 let ws, pc, localStream;
 
 function setStatus(t){ document.getElementById('status').textContent = t; }
+function setInfo(t){ const info = document.getElementById('info'); info.textContent = t; info.style.display = 'block'; }
 
 document.getElementById('startBtn').addEventListener('click', startShare);
 
 async function startShare(){
   document.getElementById('startBtn').disabled = true;
   try{
-    localStream = await navigator.mediaDevices.getDisplayMedia({video:true, audio:true});
+    localStream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        cursor: 'always',
+        displaySurface: 'monitor',
+        frameRate: { ideal: 30, max: 60 },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      },
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
   }catch(e){
     setStatus('screen share was cancelled or blocked: ' + e.message);
     document.getElementById('startBtn').disabled = false;
@@ -37,6 +56,7 @@ async function startShare(){
   }
   document.getElementById('preview').srcObject = localStream;
   setStatus('sharing - waiting for OBS to connect...');
+  setInfo('Streamer ID: ' + streamerID + '\nNetwork: detecting...');
 
   localStream.getVideoTracks()[0].addEventListener('ended', () => {
     setStatus('sharing stopped');
@@ -47,19 +67,26 @@ async function startShare(){
 }
 
 function connectSignaling(){
-  ws = new WebSocket(`${proto}://${location.host}/ws?room=${roomID}&role=player`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?room=${roomID}&role=streamer&streamerId=${streamerID}`);
 
   ws.onmessage = async (ev) => {
     const msg = JSON.parse(ev.data);
-    if(msg.type === 'peer-joined' && msg.role === 'obs'){
-      await makeOffer();
+    console.log('Streamer received:', msg);
+    if(msg.type === 'streamer-list'){
+      // There are other streamers in this room
+    } else if(msg.type === 'streamer-joined'){
+      setInfo(`Streamer ID: ${streamerID}\nOther streamers connected (network: ${msg.network})`);
+    } else if(msg.type === 'select-streamer' && msg.targetStreamerId === streamerID){
+      // OBS has selected this streamer - send offer
+      console.log('OBS selecting this streamer, sending offer');
+      if(!pc) await makeOffer();
     } else if(msg.type === 'answer'){
+      console.log('Received answer from OBS');
       await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
       setStatus('connected to OBS');
+      setInfo(`Streamer ID: ${streamerID}\nNetwork: connected`);
     } else if(msg.type === 'candidate' && msg.candidate){
       try{ await pc.addIceCandidate(msg.candidate); }catch(e){}
-    } else if(msg.type === 'peer-left' && msg.role === 'obs'){
-      setStatus('OBS disconnected - waiting for it to reconnect...');
     }
   };
 
@@ -67,18 +94,62 @@ function connectSignaling(){
 }
 
 async function makeOffer(){
-  pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
-  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  try{
+    const config = {
+      iceServers: turnConfig.servers,
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+      iceTransportPolicy: 'all'
+    };
+    pc = new RTCPeerConnection(config);
+    
+    // Add audio and video tracks with quality constraints
+    localStream.getTracks().forEach(t => {
+      const sender = pc.addTrack(t, localStream);
+      
+      // Set parameters for quality streaming
+      if (t.kind === 'video') {
+        const params = sender.getParameters();
+        if (!params.encodings) params.encodings = [{}];
+        params.encodings[0].maxBitrate = 5000000; // 5 Mbps for high quality
+        params.encodings[0].minBitrate = 1000000; // 1 Mbps minimum
+        sender.setParameters(params);
+      } else if (t.kind === 'audio') {
+        const params = sender.getParameters();
+        if (!params.encodings) params.encodings = [{}];
+        params.encodings[0].maxBitrate = 256000; // 256 kbps for audio
+        sender.setParameters(params);
+      }
+    });
 
-  pc.onicecandidate = (ev) => {
-    if(ev.candidate) ws.send(JSON.stringify({type:'candidate', candidate: ev.candidate}));
-  };
+    pc.onicecandidate = (ev) => {
+      if(ev.candidate) ws.send(JSON.stringify({type:'candidate', candidate: ev.candidate}));
+    };
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  ws.send(JSON.stringify({type:'offer', sdp: pc.localDescription}));
-  setStatus('connecting to OBS...');
+    pc.onconnectionstatechange = () => {
+      console.log('Connection state:', pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        setStatus('connected to OBS');
+        setInfo('Streamer ID: ' + streamerID + '\\nNetwork: connected');
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        setStatus('connection lost - waiting for OBS reconnect');
+      }
+    };
+
+    const offer = await pc.createOffer({
+      offerToReceiveAudio: false,
+      offerToReceiveVideo: false
+    });
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({type:'offer', sdp: pc.localDescription}));
+    setStatus('connecting to OBS...');
+    setInfo('Streamer ID: ' + streamerID + '\\nWaiting for OBS answer...');
+  }catch(e){
+    console.error('Error creating offer:', e);
+    setStatus('Error: ' + e.message);
+  }
 }
 </script>
 </body>
 </html>
+
