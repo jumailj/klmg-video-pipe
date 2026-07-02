@@ -208,9 +208,9 @@
 
 		async function shareScreen() {
 			try {
-				console.log('Streamer: Start Sharing button clicked');
+				console.log('🔴 Streamer: Start Sharing button clicked');
 				
-				console.log('Streamer: Requesting display media...');
+				console.log('🔴 Streamer: Requesting display media...');
 				localStream = await navigator.mediaDevices.getDisplayMedia({
 					video: {
 						cursor: 'always',
@@ -224,7 +224,7 @@
 					}
 				});
 
-				console.log('Streamer: Display media granted, got ' + localStream.getTracks().length + ' tracks');
+				console.log('🟢 Streamer: Display media granted, got ' + localStream.getTracks().length + ' tracks');
 				
 				const video = document.getElementById('video');
 				video.srcObject = localStream;
@@ -242,12 +242,12 @@
 				});
 
 				// Create peer connection and send offer
-				console.log('Streamer: About to create peer connection');
+				console.log('🔴 Streamer: About to create peer connection');
 				await createPeerConnection();
-				console.log('Streamer: Peer connection created, offer sent');
+				console.log('🟢 Streamer: Peer connection created, offer sent');
 
 			} catch (err) {
-				console.error('Streamer: shareScreen error:', err.name, err.message);
+				console.error('🔴 STREAMER ERROR:', err.name, err.message, err.stack);
 				if (err.name !== 'NotAllowedError') {
 					error('Error: ' + err.message);
 				}
@@ -258,27 +258,33 @@
 		async function createPeerConnection() {
 			try {
 				// Get TURN servers
-				console.log('Streamer: Fetching TURN config...');
+				console.log('🔴 Streamer: Fetching TURN config...');
 				const turnResponse = await fetch('/api/turn');
+				if (!turnResponse.ok) throw new Error('TURN fetch failed: ' + turnResponse.status);
 				const turnData = await turnResponse.json();
-				console.log('Streamer: Got ' + turnData.servers.length + ' TURN servers');
+				console.log('🟢 Streamer: Got ' + turnData.servers.length + ' TURN servers');
 
 				const config = {
 					iceServers: turnData.servers
 				};
 
-				console.log('Streamer: Creating RTCPeerConnection...');
+				console.log('🔴 Streamer: Creating RTCPeerConnection...');
 				pc = new RTCPeerConnection(config);
+				console.log('🟢 Streamer: RTCPeerConnection created');
 
 				// Add audio tracks
-				localStream.getAudioTracks().forEach(track => {
-					console.log('Streamer: Adding audio track');
+				const audioTracks = localStream.getAudioTracks();
+				console.log('🔴 Streamer: Adding ' + audioTracks.length + ' audio tracks...');
+				audioTracks.forEach(track => {
+					console.log('  - Adding audio track: ' + track.label);
 					pc.addTrack(track, localStream);
 				});
 
 				// Add video tracks with quality settings
-				localStream.getVideoTracks().forEach(track => {
-					console.log('Streamer: Adding video track');
+				const videoTracks = localStream.getVideoTracks();
+				console.log('🔴 Streamer: Adding ' + videoTracks.length + ' video tracks...');
+				videoTracks.forEach(track => {
+					console.log('  - Adding video track: ' + track.label);
 					const sender = pc.addTrack(track, localStream);
 					
 					// Set bandwidth limits
@@ -288,45 +294,56 @@
 					}
 					parameters.encodings[0].maxBitrate = 5000000; // 5Mbps for video
 					sender.setParameters(parameters);
+					console.log('  - Video bitrate capped at 5Mbps');
 				});
 
 				// Send offer when ready
 				pc.onicecandidate = (e) => {
 					if (e.candidate) {
-						console.log('Streamer: Sending ICE candidate');
-						ws.send(JSON.stringify({
-							type: 'candidate',
-							candidate: e.candidate
-						}));
+						console.log('🔵 Streamer: Sending ICE candidate');
+						try {
+							ws.send(JSON.stringify({
+								type: 'candidate',
+								candidate: e.candidate
+							}));
+						} catch (err) {
+							console.error('  - Failed to send candidate:', err);
+						}
 					}
 				};
 
 				pc.onconnectionstatechange = () => {
-					console.log('Streamer connection state:', pc.connectionState);
+					console.log('🔵 Streamer connection state: ' + pc.connectionState);
 					if (pc.connectionState === 'connected') {
 						log('✓ Streaming - viewers are connected');
 					}
 				};
 
-				console.log('Streamer: Creating offer...');
+				console.log('🔴 Streamer: Creating offer...');
 				const offer = await pc.createOffer();
-				console.log('Streamer: Offer created, setting local description');
+				console.log('🟢 Streamer: Offer created, SDP length: ' + offer.sdp.length);
+				
+				console.log('🔴 Streamer: Setting local description...');
 				await pc.setLocalDescription(offer);
-				console.log('Streamer: Sending offer with SDP length:', offer.sdp.length);
+				console.log('🟢 Streamer: Local description set');
 
-				if (!ws || ws.readyState !== WebSocket.OPEN) {
-					console.error('Streamer: WebSocket not open! readyState=' + (ws ? ws.readyState : 'null'));
-					return;
+				console.log('🔴 Streamer: Checking WebSocket...');
+				if (!ws) throw new Error('WebSocket is null!');
+				if (ws.readyState !== WebSocket.OPEN) {
+					throw new Error('WebSocket not open! readyState=' + ws.readyState + ' (OPEN=' + WebSocket.OPEN + ')');
 				}
+				console.log('🟢 Streamer: WebSocket ready, sending offer...');
 
 				ws.send(JSON.stringify({
 					type: 'offer',
 					sdp: offer.sdp
 				}));
-				console.log('Streamer: Offer sent successfully');
+				console.log('🟢 Streamer: Offer sent successfully! Message size: ' + JSON.stringify({type:'offer', sdp: offer.sdp}).length + ' bytes');
 			} catch (err) {
-				console.error('Streamer: createPeerConnection error:', err.message);
+				console.error('🔴 STREAMER ERROR in createPeerConnection:', err.name, err.message);
+				console.error('Stack:', err.stack);
 				error('Connection error: ' + err.message);
+				throw err;
 			}
 		}
 

@@ -196,24 +196,28 @@
 
 		async function handleOffer(msg) {
 			try {
-				console.log('Viewer: Received offer, setting up connection');
+				console.log('🔴 Viewer: Received offer, setting up connection');
 				// Get TURN servers
+				console.log('🔴 Viewer: Fetching TURN config...');
 				const turnResponse = await fetch('/api/turn');
+				if (!turnResponse.ok) throw new Error('TURN fetch failed: ' + turnResponse.status);
 				const turnData = await turnResponse.json();
+				console.log('🟢 Viewer: Got ' + turnData.servers.length + ' TURN servers');
 
 				const config = {
 					iceServers: turnData.servers
 				};
 
-				console.log('Viewer: Creating peer connection with', turnData.servers.length, 'TURN servers');
+				console.log('🔴 Viewer: Creating RTCPeerConnection...');
 				pc = new RTCPeerConnection(config);
+				console.log('🟢 Viewer: RTCPeerConnection created');
 
 				// Add tracks to video
 				pc.ontrack = (e) => {
-					console.log('Viewer: Received track:', e.track.kind, '- stream count:', e.streams.length);
+					console.log('🟢 Viewer: Received ' + e.track.kind + ' track! Stream count: ' + e.streams.length);
 					const video = document.getElementById('video');
 					if (video.srcObject !== e.streams[0]) {
-						console.log('Viewer: Setting video source');
+						console.log('🟢 Viewer: Setting video source');
 						video.srcObject = e.streams[0];
 						document.getElementById('waiting').style.display = 'none';
 						log('Connected - watching stream', 'connected');
@@ -222,16 +226,20 @@
 
 				pc.onicecandidate = (e) => {
 					if (e.candidate) {
-						console.log('Viewer: Sending ICE candidate');
-						ws.send(JSON.stringify({
-							type: 'candidate',
-							candidate: e.candidate
-						}));
+						console.log('🔵 Viewer: Sending ICE candidate');
+						try {
+							ws.send(JSON.stringify({
+								type: 'candidate',
+								candidate: e.candidate
+							}));
+						} catch (err) {
+							console.error('  - Failed to send candidate:', err);
+						}
 					}
 				};
 
 				pc.onconnectionstatechange = () => {
-					console.log('Viewer connection state:', pc.connectionState);
+					console.log('🔵 Viewer connection state: ' + pc.connectionState);
 					if (pc.connectionState === 'connected') {
 						log('Connected - watching stream', 'connected');
 					} else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
@@ -240,27 +248,33 @@
 				};
 
 				// Set remote description (offer from streamer)
-				console.log('Viewer: Setting remote description from offer');
+				console.log('🔴 Viewer: Setting remote description from offer (SDP length: ' + msg.sdp.length + ')');
 				await pc.setRemoteDescription(new RTCSessionDescription({
 					type: 'offer',
 					sdp: msg.sdp
 				}));
+				console.log('🟢 Viewer: Remote description set');
 
 				// Create answer
-				console.log('Viewer: Creating answer');
+				console.log('🔴 Viewer: Creating answer');
 				const answer = await pc.createAnswer();
-				console.log('Viewer: Setting local description (answer)');
+				console.log('🟢 Viewer: Answer created, SDP length: ' + answer.sdp.length);
+				
+				console.log('🔴 Viewer: Setting local description (answer)');
 				await pc.setLocalDescription(answer);
+				console.log('🟢 Viewer: Local description set');
 
 				// Send answer back to streamer
-				console.log('Viewer: Sending answer back to streamer');
+				console.log('🔴 Viewer: Sending answer back to streamer');
 				ws.send(JSON.stringify({
 					type: 'answer',
 					sdp: answer.sdp
 				}));
+				console.log('🟢 Viewer: Answer sent successfully!');
 
 			} catch (err) {
-				console.error('Error handling offer:', err);
+				console.error('🔴 VIEWER ERROR in handleOffer:', err.name, err.message);
+				console.error('Stack:', err.stack);
 				log('Connection error: ' + err.message, 'error');
 			}
 		}
