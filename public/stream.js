@@ -170,8 +170,8 @@ async function startStreaming() {
     });
 
     await updateSessionStatus('connecting');
-    pollViewerCandidates();
     await pollForAnswer();
+    pollViewerCandidates();
     setStatus('Live', 'live');
     await updateSessionStatus('live');
   } catch (error) {
