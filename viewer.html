@@ -35,9 +35,9 @@
       const id = createUUID();
       const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=viewer&stream=${encodeURIComponent(streamId)}&id=${encodeURIComponent(id)}`;
       const ws = new WebSocket(wsUrl);
-      const turnUrl = new URLSearchParams(location.search).get('turn') || '';
-      const turnUsername = new URLSearchParams(location.search).get('turnUser') || '';
-      const turnPassword = new URLSearchParams(location.search).get('turnPass') || '';
+      const turnUrl = new URLSearchParams(location.search).get('turn') || 'turn:129.154.41.124:3478';
+      const turnUsername = new URLSearchParams(location.search).get('turnUser') || 'klmg';
+      const turnPassword = new URLSearchParams(location.search).get('turnPass') || 'pass123';
       const iceServers = [{urls: ['stun:stun.l.google.com:19302']}];
       if (turnUrl) {
         iceServers.push({urls: [turnUrl], username: turnUsername, credential: turnPassword});
