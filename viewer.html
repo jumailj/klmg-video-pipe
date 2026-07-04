@@ -12,7 +12,7 @@
 </head>
 <body>
   <main>
-    <video id="video" autoplay playsinline></video>
+    <video id="video" autoplay playsinline muted></video>
   </main>
   <script>
     const params = new URLSearchParams(location.search);
@@ -46,6 +46,8 @@
 
       pc.ontrack = event => {
         videoEl.srcObject = event.streams[0];
+        videoEl.muted = true;
+        videoEl.play().catch(err => console.warn('Autoplay failed', err));
         setStatus('Receiving stream');
       };
 
