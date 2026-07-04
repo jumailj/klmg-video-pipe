@@ -27,7 +27,9 @@
   </div>
   <script>
     const params = new URLSearchParams(location.search);
-    const streamId = params.get('stream') || 'default';
+    const pathParts = location.pathname.split('/').filter(Boolean);
+    const pathStream = pathParts.length > 1 ? pathParts[1] : '';
+    const streamId = pathStream || params.get('stream') || 'default';
     document.getElementById('streamId').textContent = streamId;
     const statusEl = document.getElementById('status');
     const videoEl = document.getElementById('video');
@@ -46,9 +48,14 @@
       const id = createUUID();
       const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=viewer&stream=${encodeURIComponent(streamId)}&id=${encodeURIComponent(id)}`;
       const ws = new WebSocket(wsUrl);
-      const pc = new RTCPeerConnection({
-        iceServers: [{urls: ['stun:stun.l.google.com:19302']}]
-      });
+      const turnUrl = new URLSearchParams(location.search).get('turn') || '';
+      const turnUsername = new URLSearchParams(location.search).get('turnUser') || '';
+      const turnPassword = new URLSearchParams(location.search).get('turnPass') || '';
+      const iceServers = [{urls: ['stun:stun.l.google.com:19302']}];
+      if (turnUrl) {
+        iceServers.push({urls: [turnUrl], username: turnUsername, credential: turnPassword});
+      }
+      const pc = new RTCPeerConnection({iceServers});
 
       pc.ontrack = event => {
         videoEl.srcObject = event.streams[0];
