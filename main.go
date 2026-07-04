@@ -18,6 +18,7 @@ type signalPayload struct {
 	Candidate      string  `json:"candidate,omitempty"`
 	SDPMid         string  `json:"sdpMid,omitempty"`
 	SDPMLineIndex  *uint16 `json:"sdpMLineIndex,omitempty"`
+	Config         *StreamConfig `json:"config,omitempty"`
 }
 
 type signalMessage struct {
@@ -39,6 +40,7 @@ type room struct {
 	producer *peer
 	viewers  map[string]*peer
 	lock     sync.RWMutex
+	config   StreamConfig
 }
 
 type hub struct {
@@ -51,7 +53,30 @@ func newHub() *hub {
 }
 
 func newRoom() *room {
-	return &room{viewers: make(map[string]*peer)}
+	return &room{viewers: make(map[string]*peer), config: StreamConfig{Width: 1280, Height: 720, FPS: 60, Bitrate: 2500, MinFPS: 30, MaxFPS: 60}}
+}
+
+type StreamConfig struct {
+	Width   int `json:"width"`
+	Height  int `json:"height"`
+	FPS     int `json:"fps"`
+	Bitrate int `json:"bitrate"`
+	MinFPS  int `json:"min_fps,omitempty"`
+	MaxFPS  int `json:"max_fps,omitempty"`
+}
+
+func (h *hub) getConfig(streamID string) StreamConfig {
+	room := h.getRoom(streamID)
+	room.lock.RLock()
+	defer room.lock.RUnlock()
+	return room.config
+}
+
+func (h *hub) setConfig(streamID string, cfg StreamConfig) {
+	room := h.getRoom(streamID)
+	room.lock.Lock()
+	room.config = cfg
+	room.lock.Unlock()
 }
 
 func (h *hub) getRoom(streamID string) *room {
@@ -175,6 +200,10 @@ func main() {
 
 		p := &peer{id: peerID, role: role, streamID: streamID, conn: conn}
 		hub.addPeer(p)
+		if p.role == "producer" {
+			cfg := hub.getConfig(streamID)
+			_ = sendSignal(conn, signalMessage{Type: "config", Payload: signalPayload{Config: &cfg}})
+		}
 		defer hub.removePeer(p)
 
 		log.Printf("peer connected role=%s id=%s stream=%s", role, peerID, streamID)
@@ -197,6 +226,48 @@ func main() {
 
 			hub.relay(p, msg)
 		}
+	})
+	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		streamID := strings.TrimSpace(r.URL.Query().Get("stream"))
+		if streamID == "" {
+			streamID = "default"
+		}
+		if r.Method == http.MethodGet {
+			cfg := hub.getConfig(streamID)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg)
+			return
+		}
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			var cfg StreamConfig
+			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+				http.Error(w, "invalid config", http.StatusBadRequest)
+				return
+			}
+			if cfg.Width == 0 {
+				cfg.Width = 1280
+			}
+			if cfg.Height == 0 {
+				cfg.Height = 720
+			}
+			if cfg.FPS == 0 {
+				cfg.FPS = 60
+			}
+			if cfg.Bitrate == 0 {
+				cfg.Bitrate = 4000
+			}
+			if cfg.MinFPS == 0 {
+				cfg.MinFPS = 30
+			}
+			if cfg.MaxFPS == 0 {
+				cfg.MaxFPS = 60
+			}
+			hub.setConfig(streamID, cfg)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	})
 
 	log.Println("signaling server listening on :8080")
