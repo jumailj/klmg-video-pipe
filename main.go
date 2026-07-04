@@ -126,6 +126,19 @@ func (h *hub) removePeer(p *peer) {
 	delete(room.viewers, p.id)
 }
 
+func resolveStreamID(r *http.Request) string {
+	if streamID := strings.TrimSpace(r.URL.Query().Get("stream")); streamID != "" {
+		return streamID
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/view")
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || path == "view" {
+		return "default"
+	}
+	return path
+}
+
 func (h *hub) relay(p *peer, msg signalMessage) {
 	room := h.getRoom(p.streamID)
 	if p.role == "viewer" {
@@ -174,6 +187,7 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/view/", func(w http.ResponseWriter, r *http.Request) {
+		_ = resolveStreamID(r)
 		http.ServeFile(w, r, "viewer.html")
 	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {

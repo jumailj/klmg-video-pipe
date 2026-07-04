@@ -27,7 +27,9 @@
   </div>
   <script>
     const params = new URLSearchParams(location.search);
-    const streamId = params.get('stream') || 'default';
+    const pathParts = location.pathname.split('/').filter(Boolean);
+    const streamIdFromPath = pathParts.length > 1 && pathParts[0] === 'view' ? pathParts[1] : null;
+    const streamId = params.get('stream') || streamIdFromPath || 'default';
     document.getElementById('streamId').textContent = streamId;
     const statusEl = document.getElementById('status');
     const videoEl = document.getElementById('video');
