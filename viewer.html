@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebRTC Viewer</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #eee; }
+    #container { display: flex; flex-direction: column; min-height: 100vh; }
+    header { padding: 1rem; background: #111; border-bottom: 1px solid #333; }
+    main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+    video { max-width: 100%; max-height: 80vh; border: 1px solid #444; background: black; }
+    footer { padding: 0.75rem 1rem; font-size: 0.9rem; color: #ccc; }
+    .status { margin-top: 0.5rem; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <header>
+      <strong>WebRTC Viewer</strong>
+      <div class="status" id="status">Connecting...</div>
+    </header>
+    <main>
+      <video id="video" autoplay playsinline controls></video>
+    </main>
+    <footer id="footer">Stream: <span id="streamId"></span></footer>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const streamId = params.get('stream') || 'default';
+    document.getElementById('streamId').textContent = streamId;
+    const statusEl = document.getElementById('status');
+    const videoEl = document.getElementById('video');
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function createUUID() {
+      return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+        (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+      );
+    }
+
+    async function start() {
+      const id = createUUID();
+      const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=viewer&stream=${encodeURIComponent(streamId)}&id=${encodeURIComponent(id)}`;
+      const ws = new WebSocket(wsUrl);
+      const pc = new RTCPeerConnection({
+        iceServers: [{urls: ['stun:stun.l.google.com:19302']}]
+      });
+
+      pc.ontrack = event => {
+        videoEl.srcObject = event.streams[0];
+        setStatus('Receiving stream');
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        setStatus('ICE state: ' + pc.iceConnectionState);
+      };
+
+      pc.onconnectionstatechange = () => {
+        setStatus('Connection state: ' + pc.connectionState);
+      };
+
+      ws.onopen = async () => {
+        setStatus('Connected to signaling server');
+        pc.addTransceiver('video', {direction: 'recvonly'});
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({type: 'offer', stream_id: streamId, payload: {sdp: offer.sdp}}));
+      };
+
+      ws.onmessage = async event => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'answer' && msg.payload?.sdp) {
+          await pc.setRemoteDescription({type: 'answer', sdp: msg.payload.sdp});
+          setStatus('Remote description set');
+          return;
+        }
+        if (msg.type === 'ice-candidate' && msg.payload?.candidate) {
+          try {
+            await pc.addIceCandidate({candidate: msg.payload.candidate});
+          } catch (err) {
+            console.warn('Failed to add remote ICE candidate', err);
+          }
+          return;
+        }
+      };
+
+      ws.onerror = event => {
+        setStatus('Signaling error');
+        console.error(event);
+      };
+
+      ws.onclose = () => {
+        setStatus('Signaling connection closed');
+      };
+
+      pc.onicecandidate = event => {
+        if (event.candidate && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({type: 'ice-candidate', payload: {candidate: event.candidate.candidate}}));
+        }
+      };
+    }
+
+    start().catch(err => {
+      console.error(err);
+      setStatus('Startup error: ' + err.message);
+    });
+  </script>
+</body>
+</html>

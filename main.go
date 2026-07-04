@@ -1,364 +1,202 @@
 package main
 
 import (
-	"embed"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
-	"flag"
-	"fmt"
-	"io/fs"
 	"log"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
-	"time"
+
+	"nhooyr.io/websocket"
 )
 
-//go:embed public/*
-var publicFiles embed.FS
-
-var (
-	sessions   = map[string]*Session{}
-	sessionsMu sync.Mutex
-)
-
-type Session struct {
-	ID string
-
-	SenderOffer  *SDPMessage
-	ViewerAnswer *SDPMessage
-
-	SenderCandidates []ICECandidate
-	ViewerCandidates []ICECandidate
-
-	Name    string
-	Team    string
-	Quality string
-	Status  string
-
-	Updated time.Time
+type signalPayload struct {
+	SDP       string `json:"sdp,omitempty"`
+	Candidate string `json:"candidate,omitempty"`
 }
 
-type SessionRequest struct {
-	ID      string `json:"id"`
-	Name    string `json:"name,omitempty"`
-	Team    string `json:"team,omitempty"`
-	Quality string `json:"quality,omitempty"`
-	Status  string `json:"status,omitempty"`
+type signalMessage struct {
+	Type     string        `json:"type"`
+	StreamID string        `json:"stream_id,omitempty"`
+	From     string        `json:"from,omitempty"`
+	To       string        `json:"to,omitempty"`
+	Payload  signalPayload `json:"payload"`
 }
 
-type SDPMessage struct {
-	Type string `json:"type"`
-	SDP  string `json:"sdp"`
+type peer struct {
+	id       string
+	role     string
+	streamID string
+	conn     *websocket.Conn
 }
 
-type ICECandidate struct {
-	Candidate     string `json:"candidate"`
-	SDPMid        string `json:"sdpMid"`
-	SDPMLineIndex uint16 `json:"sdpMLineIndex"`
+type room struct {
+	producer *peer
+	viewers  map[string]*peer
+	lock     sync.RWMutex
 }
 
-type SignalRequest struct {
-	Role    string      `json:"role"`
-	ID      string      `json:"id"`
-	Message interface{} `json:"message"`
-	Quality string      `json:"quality,omitempty"`
+type hub struct {
+	rooms map[string]*room
+	lock  sync.RWMutex
 }
 
-type CandidateRequest struct {
-	Role      string       `json:"role"`
-	ID        string       `json:"id"`
-	Candidate ICECandidate `json:"candidate"`
+func newHub() *hub {
+	return &hub{rooms: make(map[string]*room)}
 }
 
-type SignalResponse struct {
-	Status string      `json:"status"`
-	Data   interface{} `json:"data,omitempty"`
+func newRoom() *room {
+	return &room{viewers: make(map[string]*peer)}
+}
+
+func (h *hub) getRoom(streamID string) *room {
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		streamID = "default"
+	}
+
+	h.lock.RLock()
+	room, ok := h.rooms[streamID]
+	h.lock.RUnlock()
+	if ok {
+		return room
+	}
+
+	h.lock.Lock()
+	defer h.lock.Unlock()
+	if room, ok = h.rooms[streamID]; ok {
+		return room
+	}
+	room = newRoom()
+	h.rooms[streamID] = room
+	return room
+}
+
+func (h *hub) addPeer(p *peer) {
+	room := h.getRoom(p.streamID)
+	room.lock.Lock()
+	defer room.lock.Unlock()
+	if p.role == "producer" {
+		room.producer = p
+		return
+	}
+	room.viewers[p.id] = p
+}
+
+func (h *hub) removePeer(p *peer) {
+	room := h.getRoom(p.streamID)
+	room.lock.Lock()
+	defer room.lock.Unlock()
+	if p.role == "producer" {
+		if room.producer == p {
+			room.producer = nil
+		}
+		return
+	}
+	delete(room.viewers, p.id)
+}
+
+func (h *hub) relay(p *peer, msg signalMessage) {
+	room := h.getRoom(p.streamID)
+	if p.role == "viewer" {
+		room.lock.RLock()
+		producer := room.producer
+		room.lock.RUnlock()
+		if producer == nil {
+			return
+		}
+		msg.From = p.id
+		_ = sendSignal(producer.conn, msg)
+		return
+	}
+
+	if p.role == "producer" {
+		room.lock.RLock()
+		viewer, ok := room.viewers[msg.To]
+		room.lock.RUnlock()
+		if !ok {
+			return
+		}
+		msg.From = p.id
+		_ = sendSignal(viewer.conn, msg)
+	}
+}
+
+func sendSignal(conn *websocket.Conn, msg signalMessage) error {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	return conn.Write(context.Background(), websocket.MessageText, payload)
+}
+
+func generateID() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func main() {
-	port := flag.String("port", "8080", "HTTP port to listen on")
-	flag.Parse()
-
+	hub := newHub()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/api/stream-links", streamLinksHandler)
-	mux.HandleFunc("/signal", signalHandler)
-	mux.HandleFunc("/ice", iceHandler)
-	mux.HandleFunc("/player/", uiHandler)
-	mux.HandleFunc("/view/", uiHandler)
-	mux.HandleFunc("/public", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/", http.StatusFound)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/public/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/", http.StatusFound)
+	mux.HandleFunc("/view/", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "viewer.html")
 	})
-	mux.HandleFunc("/api/session", sessionHandler)
-
-	publicFS, err := fs.Sub(publicFiles, "public")
-	if err != nil {
-		log.Fatalf("failed to initialize public filesystem: %v", err)
-	}
-	mux.Handle("/", http.FileServer(http.FS(publicFS)))
-
-	addr := fmt.Sprintf(":%s", *port)
-	log.Printf("Starting KLMG StreamLink server on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
-}
-
-func getSession(id string) *Session {
-	sessionsMu.Lock()
-	defer sessionsMu.Unlock()
-	s, ok := sessions[id]
-	if !ok {
-		s = &Session{ID: id, Updated: time.Now()}
-		sessions[id] = s
-	}
-	s.Updated = time.Now()
-	return s
-}
-
-func signalHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		var req SignalRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			log.Printf("accept failed: %v", err)
 			return
 		}
-		session := getSession(req.ID)
+		defer conn.Close(websocket.StatusNormalClosure, "server shutdown")
+		conn.SetReadLimit(64 << 20)
 
-		if req.Quality != "" {
-			session.Quality = req.Quality
+		role := r.URL.Query().Get("role")
+		if role == "" {
+			role = "viewer"
+		}
+		streamID := r.URL.Query().Get("stream")
+		if streamID == "" {
+			streamID = "default"
+		}
+		peerID := r.URL.Query().Get("id")
+		if peerID == "" {
+			peerID = generateID()
 		}
 
-		switch req.Role {
-		case "sender":
-			if msg, ok := req.Message.(map[string]interface{}); ok {
-				session.SenderOffer = &SDPMessage{Type: msg["type"].(string), SDP: msg["sdp"].(string)}
+		p := &peer{id: peerID, role: role, streamID: streamID, conn: conn}
+		hub.addPeer(p)
+		defer hub.removePeer(p)
+
+		log.Printf("peer connected role=%s id=%s stream=%s", role, peerID, streamID)
+		for {
+			msgType, payload, err := conn.Read(context.Background())
+			if err != nil {
+				log.Printf("read error for %s: %v", peerID, err)
+				return
 			}
-			session.Status = "connecting"
-			respondJSON(w, SignalResponse{Status: "ok"})
-			return
-		case "viewer":
-			if msg, ok := req.Message.(map[string]interface{}); ok {
-				session.ViewerAnswer = &SDPMessage{Type: msg["type"].(string), SDP: msg["sdp"].(string)}
+
+			if msgType != websocket.MessageText {
+				continue
 			}
-			respondJSON(w, SignalResponse{Status: "ok"})
-			return
-		default:
-			http.Error(w, "invalid role", http.StatusBadRequest)
-			return
-		}
-	}
 
-	q := r.URL.Query()
-	role := q.Get("role")
-	id := q.Get("id")
-	msgType := q.Get("type")
-	if id == "" || role == "" || msgType == "" {
-		http.Error(w, "missing query parameters", http.StatusBadRequest)
-		return
-	}
+			var msg signalMessage
+			if err := json.Unmarshal(payload, &msg); err != nil {
+				log.Printf("unmarshal error: %v", err)
+				continue
+			}
 
-	session := getSession(id)
-	switch role {
-	case "viewer":
-		if msgType != "offer" {
-			http.Error(w, "viewer only retrieves sender offer", http.StatusBadRequest)
-			return
+			hub.relay(p, msg)
 		}
-		if session.SenderOffer == nil {
-			respondJSON(w, SignalResponse{Status: "pending"})
-			return
-		}
-		respondJSON(w, SignalResponse{Status: "ok", Data: session.SenderOffer})
-		return
-	case "sender":
-		if msgType != "answer" {
-			http.Error(w, "sender only retrieves viewer answer", http.StatusBadRequest)
-			return
-		}
-		if session.ViewerAnswer == nil {
-			respondJSON(w, SignalResponse{Status: "pending"})
-			return
-		}
-		respondJSON(w, SignalResponse{Status: "ok", Data: session.ViewerAnswer})
-		return
-	default:
-		http.Error(w, "invalid role", http.StatusBadRequest)
-		return
-	}
-}
+	})
 
-func iceHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		var req CandidateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		session := getSession(req.ID)
-		switch req.Role {
-		case "sender":
-			session.SenderCandidates = append(session.SenderCandidates, req.Candidate)
-			respondJSON(w, SignalResponse{Status: "ok"})
-			return
-		case "viewer":
-			session.ViewerCandidates = append(session.ViewerCandidates, req.Candidate)
-			respondJSON(w, SignalResponse{Status: "ok"})
-			return
-		default:
-			http.Error(w, "invalid role", http.StatusBadRequest)
-			return
-		}
-	}
-
-	q := r.URL.Query()
-	role := q.Get("role")
-	id := q.Get("id")
-	if id == "" || role == "" {
-		http.Error(w, "missing query parameters", http.StatusBadRequest)
-		return
-	}
-	session := getSession(id)
-	switch role {
-	case "sender":
-		respondJSON(w, SignalResponse{Status: "ok", Data: session.ViewerCandidates})
-		return
-	case "viewer":
-		respondJSON(w, SignalResponse{Status: "ok", Data: session.SenderCandidates})
-		return
-	default:
-		http.Error(w, "invalid role", http.StatusBadRequest)
-		return
-	}
-}
-
-func uiHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/player/" || r.URL.Path == "/player" {
-		http.Redirect(w, r, "/player.html", http.StatusFound)
-		return
-	}
-	if r.URL.Path == "/view/" || r.URL.Path == "/view" {
-		http.Redirect(w, r, "/view.html", http.StatusFound)
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, "/player/") {
-		http.ServeFile(w, r, filepath.FromSlash("public/player.html"))
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, "/view/") {
-		http.ServeFile(w, r, filepath.FromSlash("public/view.html"))
-		return
-	}
-	http.NotFound(w, r)
-}
-
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"ok"}`))
-}
-
-func streamLinksHandler(w http.ResponseWriter, r *http.Request) {
-	sessionsMu.Lock()
-	defer sessionsMu.Unlock()
-
-	list := make([]map[string]interface{}, 0, len(sessions))
-	for _, session := range sessions {
-		if session.Quality == "" {
-			session.Quality = "standard"
-		}
-		status := session.Status
-		if status == "" {
-			status = "offline"
-		}
-		name := session.Name
-		if name == "" {
-			name = fmt.Sprintf("Player %s", session.ID)
-		}
-		team := session.Team
-		list = append(list, map[string]interface{}{
-			"id":         session.ID,
-			"name":       name,
-			"team":       team,
-			"quality":    session.Quality,
-			"status":     status,
-			"streamLink": fmt.Sprintf("/player/%s", session.ID),
-			"viewerLink": fmt.Sprintf("/view/%s", session.ID),
-		})
-	}
-
-	if len(list) == 0 {
-		list = append(list, map[string]interface{}{
-			"id":         "player01",
-			"name":       "Player 01",
-			"team":       "Team Alpha",
-			"quality":    "standard",
-			"status":     "offline",
-			"streamLink": "/player/player01",
-			"viewerLink": "/view/player01",
-		})
-	}
-
-	respondJSON(w, list)
-}
-
-func sessionHandler(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		id := r.URL.Query().Get("id")
-		if id == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
-			return
-		}
-		session := getSession(id)
-		if session.Quality == "" {
-			session.Quality = "standard"
-		}
-		status := session.Status
-		if status == "" {
-			status = "offline"
-		}
-		respondJSON(w, map[string]interface{}{
-			"id":      session.ID,
-			"name":    session.Name,
-			"team":    session.Team,
-			"quality": session.Quality,
-			"status":  status,
-		})
-	case http.MethodPost:
-		var req SessionRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if req.ID == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
-			return
-		}
-		session := getSession(req.ID)
-		if req.Name != "" {
-			session.Name = req.Name
-		}
-		if req.Team != "" {
-			session.Team = req.Team
-		}
-		if req.Quality != "" {
-			session.Quality = req.Quality
-		}
-		if req.Status != "" {
-			session.Status = req.Status
-		}
-		if session.Quality == "" {
-			session.Quality = "standard"
-		}
-		respondJSON(w, map[string]string{"status": "ok"})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func respondJSON(w http.ResponseWriter, value interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(value)
+	log.Println("signaling server listening on :8080")
+	log.Fatal(http.ListenAndServe(":8080", mux))
 }
