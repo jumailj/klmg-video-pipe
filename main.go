@@ -14,8 +14,10 @@ import (
 )
 
 type signalPayload struct {
-	SDP       string `json:"sdp,omitempty"`
-	Candidate string `json:"candidate,omitempty"`
+	SDP            string  `json:"sdp,omitempty"`
+	Candidate      string  `json:"candidate,omitempty"`
+	SDPMid         string  `json:"sdpMid,omitempty"`
+	SDPMLineIndex  *uint16 `json:"sdpMLineIndex,omitempty"`
 }
 
 type signalMessage struct {

@@ -80,7 +80,11 @@
         }
         if (msg.type === 'ice-candidate' && msg.payload?.candidate) {
           try {
-            await pc.addIceCandidate({candidate: msg.payload.candidate});
+            await pc.addIceCandidate({
+              candidate: msg.payload.candidate,
+              sdpMid: msg.payload.sdpMid,
+              sdpMLineIndex: msg.payload.sdpMLineIndex
+            });
           } catch (err) {
             console.warn('Failed to add remote ICE candidate', err);
           }
@@ -99,7 +103,14 @@
 
       pc.onicecandidate = event => {
         if (event.candidate && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({type: 'ice-candidate', payload: {candidate: event.candidate.candidate}}));
+          ws.send(JSON.stringify({
+            type: 'ice-candidate',
+            payload: {
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            }
+          }));
         }
       };
     }
