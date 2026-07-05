@@ -5,14 +5,39 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>WebRTC Viewer</title>
   <style>
-    body { margin: 0; background: black; color: #000; }
-    main { width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; background: black; }
+    body { margin: 0; background: black; color: #000; font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; }
+    main { width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; background: black; position: relative; }
     video { width: 100%; height: 100%; object-fit: contain; background: black; }
+    #unmute-btn {
+      position: absolute;
+      bottom: 24px;
+      right: 24px;
+      background: rgba(0, 0, 0, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 50%;
+      width: 48px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 10;
+      transition: background 0.2s, transform 0.1s;
+    }
+    #unmute-btn:hover { background: rgba(0, 0, 0, 0.8); }
+    #unmute-btn:active { transform: scale(0.95); }
+    #unmute-btn svg { width: 24px; height: 24px; fill: white; }
   </style>
 </head>
 <body>
   <main>
     <video id="video" autoplay playsinline muted></video>
+    <div id="unmute-btn" onclick="toggleMute()">
+      <svg id="mute-icon" viewBox="0 0 24 24">
+        <!-- Muted Icon by default (speaker with slash) -->
+        <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.21.05-.42.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
+      </svg>
+    </div>
   </main>
   <script>
     const params = new URLSearchParams(location.search);
@@ -31,6 +56,16 @@
       );
     }
 
+    function toggleMute() {
+      videoEl.muted = !videoEl.muted;
+      const icon = document.getElementById('mute-icon');
+      if (videoEl.muted) {
+        icon.innerHTML = '<path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.21.05-.42.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>';
+      } else {
+        icon.innerHTML = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>';
+      }
+    }
+
     async function start() {
       const id = createUUID();
       const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=viewer&stream=${encodeURIComponent(streamId)}&id=${encodeURIComponent(id)}`;
@@ -45,10 +80,12 @@
       const pc = new RTCPeerConnection({iceServers});
 
       pc.ontrack = event => {
-        videoEl.srcObject = event.streams[0];
-        videoEl.muted = true;
-        videoEl.play().catch(err => console.warn('Autoplay failed', err));
-        setStatus('Receiving stream');
+        if (videoEl.srcObject !== event.streams[0]) {
+          videoEl.srcObject = event.streams[0];
+          videoEl.muted = true;
+          videoEl.play().catch(err => console.warn('Autoplay failed', err));
+        }
+        setStatus('Receiving stream: ' + event.track.kind);
       };
 
       pc.oniceconnectionstatechange = () => {
@@ -62,6 +99,7 @@
       ws.onopen = async () => {
         setStatus('Connected to signaling server');
         pc.addTransceiver('video', {direction: 'recvonly'});
+        pc.addTransceiver('audio', {direction: 'recvonly'});
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         ws.send(JSON.stringify({type: 'offer', stream_id: streamId, payload: {sdp: offer.sdp}}));
