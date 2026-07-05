@@ -31,7 +31,12 @@
 </head>
 <body>
   <main>
-    <video id="video" autoplay playsinline muted></video>
+    <div id="debug-info" style="position: absolute; top: 16px; left: 16px; background: rgba(0,0,0,0.85); color: #10b981; padding: 10px 14px; font-family: monospace; font-size: 12px; z-index: 100; pointer-events: none; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); line-height: 1.5; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+      Connection: Connecting...<br/>
+      Video Track: INACTIVE<br/>
+      Audio Track: INACTIVE
+    </div>
+    <video id="video" autoplay playsinline muted controls style="border-radius: 8px; max-width: 95%; max-height: 95%; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);"></video>
     <div id="unmute-btn" onclick="toggleMute()">
       <svg id="mute-icon" viewBox="0 0 24 24">
         <!-- Muted Icon by default (speaker with slash) -->
@@ -40,6 +45,18 @@
     </div>
   </main>
   <script>
+    let hasVideo = false;
+    let hasAudio = false;
+    let currentConnectionState = 'Connecting...';
+
+    function updateDebugHUD() {
+      document.getElementById('debug-info').innerHTML = `
+        Connection: <span style="color: ${currentConnectionState === 'connected' ? '#34d399' : '#fb7185'}">${currentConnectionState}</span><br/>
+        Video Track: <span style="color: ${hasVideo ? '#34d399' : '#94a3b8'}">${hasVideo ? 'ACTIVE' : 'INACTIVE'}</span><br/>
+        Audio Track: <span style="color: ${hasAudio ? '#34d399' : '#94a3b8'}">${hasAudio ? 'ACTIVE' : 'INACTIVE'}</span>
+      `;
+    }
+
     const params = new URLSearchParams(location.search);
     const pathParts = location.pathname.split('/').filter(Boolean);
     const streamIdFromPath = pathParts.length > 1 && pathParts[0] === 'view' ? pathParts[1] : null;
@@ -80,6 +97,10 @@
       const pc = new RTCPeerConnection({iceServers});
 
       pc.ontrack = event => {
+        if (event.track.kind === 'video') hasVideo = true;
+        if (event.track.kind === 'audio') hasAudio = true;
+        updateDebugHUD();
+
         if (videoEl.srcObject !== event.streams[0]) {
           videoEl.srcObject = event.streams[0];
           videoEl.muted = true;
@@ -94,6 +115,8 @@
 
       pc.onconnectionstatechange = () => {
         setStatus('Connection state: ' + pc.connectionState);
+        currentConnectionState = pc.connectionState;
+        updateDebugHUD();
       };
 
       ws.onopen = async () => {
